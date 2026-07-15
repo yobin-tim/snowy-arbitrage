@@ -1,0 +1,9 @@
+parameter,value,note
+power_mw,2200.0,"plant power rating, either direction"
+max_stored_energy_mwh,398862.0176087328,reservoir capacity (A4)
+round_trip_efficiency,0.77,"eta, split evenly across the legs"
+var_om_per_mwh,4.0,variable O&M charged on generation
+interval_hr,0.5,"length of one dispatch step, hours"
+s2_buy_trigger_per_mwh,68.47709183333332,frozen on 2022 to 2024 pooled prices
+s2_sell_trigger_per_mwh,132.75382666666664,frozen on 2022 to 2024 pooled prices
+train_years,2022 2023 2024,S2 and S3 training window; 2025 held out

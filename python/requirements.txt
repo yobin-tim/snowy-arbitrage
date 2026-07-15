@@ -9,6 +9,7 @@ nemosis==3.8.1     # pulls public AEMO NEMWeb price tables (DISPATCHPRICE)
 pandas==3.0.3      # tidy time-series handling
 numpy==2.5.1       # arrays / maths
 pyarrow==25.0.0    # read/write the cached parquet price snapshots
+openpyxl==3.1.5    # write the Excel results workbook (results/results.xlsx)
 #
 # Optimisation (the perfect-foresight dispatch is a linear program):
 cvxpy==1.9.2       # models the LP in readable Python

@@ -66,6 +66,8 @@ raised assertion aborts the render. To work cell by cell instead, open
 | `requirements.txt` | Pinned dependencies for the venv, Colab, and Binder. The repo-root `binder/requirements.txt` simply includes this file, since Binder does not look inside `python/`. |
 | `data/nsw1_prices_*_30min.parquet` | Committed price snapshots, one per year. **This is why the notebook reproduces exact numbers offline.** Public AEMO data, tidied to 30-minute steps. Delete a snapshot to force a fresh download from AEMO (via the open-source NEMOSIS package). |
 | `figures/*.png` | Every figure, saved on each run, ready for presentation slides. |
+| `results/` | **The model's outputs, written by every render**: the half-hourly dispatch of all three schemes (`dispatch.parquet`), the annual `summary.csv`, the frozen `parameters.csv`, and `results.xlsx` for spreadsheet users. The summary is recomputed from the dispatch table and checked against the report's own numbers before it is written. |
+| `workbench.py` | Quick-question scratchpad. Loads `data/` and `results/` instantly (no solving), answers ad-hoc questions in a few lines, and its `export()` helper drops any table into `exports/` as CSV or xlsx for Excel. Open it in VS Code and run cells (`# %%`), or run it as a plain script. |
 
 ## Maintainer workflow: review and publish a change
 

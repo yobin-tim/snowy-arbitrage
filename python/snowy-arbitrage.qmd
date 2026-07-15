@@ -14,6 +14,8 @@ format:
     embed-resources: true
     fig-align: center
     tbl-cap-location: bottom
+    grid:
+      body-width: 1000px   # match the text column to the figures (drawn 9in wide, ~1080px)
 execute:
   warning: false
 jupyter: snowy-arbitrage
@@ -1424,6 +1426,102 @@ display(Markdown(
     f"further **\\${fc_recovers:.2f} bn**, and the remaining **\\${resid_gap:.2f} bn** is the "
     f"realised gap between this forecaster and the ceiling."
 ))
+```
+
+### Results store
+
+Every render writes the backtest's outputs to `python/results/`, so simple questions can be answered without re-running the model: the half-hourly dispatch of all three schemes as one tidy table (`dispatch.parquet`), the annual summary (`summary.csv`), the frozen parameters (`parameters.csv`), and an Excel workbook of the small tables (`results.xlsx`). The companion script `workbench.py` loads the store for quick queries; the summary numbers are recomputed from the dispatch table itself and checked against the schemes' reported profits before anything is written.
+
+```{python}
+#| code-summary: "Write the results store: dispatch paths, annual summary, parameters, and the Excel workbook"
+# Persist the backtest's outputs so they can be queried later (by workbench.py, or straight
+# from Excel) without re-running the solvers. Everything below is derived from objects the
+# report has already computed; nothing new is decided here.
+RESULTS_DIR = DATA_DIR.parent / "results"
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+dt_hr = snowy.interval_hr
+
+# Step 1. One long, tidy table of every scheme's half-hourly dispatch. Scheme 2's simulator
+# returns only the reservoir path, so its two legs are reconstructed from the level changes:
+# a rise in the store came from pumping, a fall came from generating (exact by construction,
+# because the simulator never does both in the same half hour).
+def _legs_from_store(stored_path):
+    ds = np.diff(stored_path)
+    pump = np.where(ds > 0, ds / (snowy.eta_pump * dt_hr), 0.0)
+    gen  = np.where(ds < 0, -ds * snowy.eta_gen / dt_hr, 0.0)
+    return pump, gen
+
+_frames = []
+for _year in YEARS:
+    _px = prices_by_year[_year]
+    for _scheme, _out in (("S1 perfect foresight", ceiling_by_year[_year]),
+                          ("S2 rule of thumb",     s2_scored[_year]),
+                          ("S3 forecaster",        scheme3_by_year[_year])):
+        _pump, _gen = (_out["pump"], _out["gen"]) if "pump" in _out else _legs_from_store(_out["stored"])
+        _frames.append(pd.DataFrame({
+            "year": _year, "scheme": _scheme,
+            "interval_start": _px.index, "price_per_mwh": _px.to_numpy(),
+            "pump_mw": _pump, "gen_mw": _gen,
+            "stored_mwh": np.asarray(_out["stored"])[:-1],   # level at the START of each half hour
+        }))
+dispatch = pd.concat(_frames, ignore_index=True)
+
+# Step 2. The annual summary, recomputed FROM the dispatch table (profit = sales - purchases
+# - variable O&M, the report's definition throughout) so the store is self-consistent...
+dispatch["profit_dollars"] = ((dispatch["gen_mw"] - dispatch["pump_mw"]) * dispatch["price_per_mwh"]
+                              - snowy.var_om_per_mwh * dispatch["gen_mw"]) * dt_hr
+summary = (dispatch.groupby(["year", "scheme"])
+           .agg(profit_bn=("profit_dollars", lambda s: s.sum() / 1e9),
+                energy_sold_gwh=("gen_mw", lambda s: s.sum() * dt_hr / 1e3),
+                energy_bought_gwh=("pump_mw", lambda s: s.sum() * dt_hr / 1e3))
+           .reset_index())
+_g = dispatch.groupby(["year", "scheme"])
+summary["capacity_factor"] = _g.apply(
+    lambda d: d["gen_mw"].sum() / (snowy.power_mw * len(d)), include_groups=False).to_numpy()
+summary["mean_buy_per_mwh"] = _g.apply(
+    lambda d: (d["pump_mw"] * d["price_per_mwh"]).sum() / d["pump_mw"].sum(), include_groups=False).to_numpy()
+summary["mean_sell_per_mwh"] = _g.apply(
+    lambda d: (d["gen_mw"] * d["price_per_mwh"]).sum() / d["gen_mw"].sum(), include_groups=False).to_numpy()
+_ceiling_bn = summary.loc[summary["scheme"] == "S1 perfect foresight"].set_index("year")["profit_bn"]
+summary["share_of_ceiling"] = summary["profit_bn"] / summary["year"].map(_ceiling_bn)
+
+# ... and checked against the profits the schemes themselves reported, so a store that
+# disagrees with the report can never be written.
+_reported = {("S1 perfect foresight", y): ceiling_by_year[y]["profit"] for y in YEARS}
+_reported |= {("S2 rule of thumb", y): s2_by_year[y] for y in YEARS}
+_reported |= {("S3 forecaster", y): scheme3_by_year[y]["profit"] for y in YEARS}
+for _row in summary.itertuples():
+    _want = _reported[(_row.scheme, _row.year)] / 1e9
+    assert abs(_row.profit_bn - _want) <= max(1e-4, 1e-6 * abs(_want)), \
+        f"store profit for {_row.scheme} {_row.year} disagrees with the report"
+
+# Step 3. The frozen parameters a downstream user needs to interpret the store.
+parameters = pd.DataFrame([
+    ("power_mw", snowy.power_mw, "plant power rating, either direction"),
+    ("max_stored_energy_mwh", snowy.max_stored_energy, "reservoir capacity (A4)"),
+    ("round_trip_efficiency", snowy.eta_pump * snowy.eta_gen, "eta, split evenly across the legs"),
+    ("var_om_per_mwh", snowy.var_om_per_mwh, "variable O&M charged on generation"),
+    ("interval_hr", dt_hr, "length of one dispatch step, hours"),
+    ("s2_buy_trigger_per_mwh", buy_trigger, "frozen on 2022 to 2024 pooled prices"),
+    ("s2_sell_trigger_per_mwh", sell_trigger, "frozen on 2022 to 2024 pooled prices"),
+    ("train_years", "2022 2023 2024", "S2 and S3 training window; 2025 held out"),
+], columns=["parameter", "value", "note"])
+
+# Step 4. Write everything: parquet for the big table, CSV for the small ones, and one Excel
+# workbook (summary, monthly profit, parameters) for spreadsheet users.
+dispatch.to_parquet(RESULTS_DIR / "dispatch.parquet", index=False)
+summary.to_csv(RESULTS_DIR / "summary.csv", index=False)
+parameters.to_csv(RESULTS_DIR / "parameters.csv", index=False)
+monthly = (dispatch.assign(month=dispatch["interval_start"].dt.to_period("M").astype(str))
+           .groupby(["scheme", "month"], as_index=False)["profit_dollars"].sum()
+           .assign(profit_m=lambda d: d["profit_dollars"] / 1e6)
+           .pivot(index="month", columns="scheme", values="profit_m").round(2))
+with pd.ExcelWriter(RESULTS_DIR / "results.xlsx", engine="openpyxl") as _xl:
+    summary.round(4).to_excel(_xl, sheet_name="Summary", index=False)
+    monthly.to_excel(_xl, sheet_name="Monthly profit ($m)")
+    parameters.to_excel(_xl, sheet_name="Parameters", index=False)
+print(f"Results store written to {RESULTS_DIR}/: dispatch.parquet "
+      f"({len(dispatch):,} rows), summary.csv, parameters.csv, results.xlsx")
 ```
 
 ### Data notes

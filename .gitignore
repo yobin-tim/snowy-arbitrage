@@ -4,6 +4,9 @@
 __pycache__/
 .DS_Store
 
+# Ad-hoc workbench exports: local scratch output, never tracked
+python/exports/
+
 # Quarto intermediate files
 *.quarto_ipynb
 *.quarto_ipynb_*
