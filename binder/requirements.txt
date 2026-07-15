@@ -1,0 +1,4 @@
+# Binder build recipe. Binder only reads configuration from this binder/
+# folder, so this file simply points at the project's pinned dependency
+# list; pip resolves the -r path relative to this file's location.
+-r ../python/requirements.txt

@@ -1,0 +1,1432 @@
+---
+title: The Arbitrage Value of Snowy 2.0
+subtitle: 'A backtest of storage arbitrage on NSW spot prices, 2022 to 2025'
+date: today
+format:
+  html:
+    toc: true
+    toc-title: Contents
+    toc-depth: 3
+    code-fold: true
+    code-summary: Show the code
+    code-tools: true
+    theme: cosmo
+    embed-resources: true
+    fig-align: center
+    tbl-cap-location: bottom
+execute:
+  warning: false
+jupyter: snowy-arbitrage
+---
+
+> **Run this yourself.** [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/yobin-tim/snowy-arbitrage/blob/main/python/snowy-arbitrage.ipynb) [![Launch Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/yobin-tim/snowy-arbitrage/main?labpath=python/snowy-arbitrage.ipynb)
+
+*Produced with help from Claude Code. All method choices, data, and conclusions are the author's own.*
+
+::: callout-tip
+## Summary
+
+In this report, we backtest energy arbitrage for a plant with Snowy 2.0's published specifications against four years of real half-hourly NSW spot prices (2022 to 2025). We consider three dispatch schemes that provide bounds on the profitability of the strategy. Firstly, we consider a perfect-foresight case where the plant **knows** the future prices and can dispatch optimally. Secondly, we consider a **rule of thumb** where the plant dispatches on two fixed price triggers that say when to charge and discharge. Finally, we consider a **forecaster** which dispatches on a statistical model of prices, trained on the first three years and tested on the fourth. Our results show that knowing the distribution of prices is almost as good as knowing the actual prices, capturing **84 to 93%** of the perfect-foresight profits. Note however that this analysis assumes that the plant is a price-taker, and does not account for the fact that a plant of this size will move prices against itself. Hence, the profit estimates should be read as optimistic rather than fair.
+:::
+
+## Introduction
+
+Snowy 2.0 is a 2,200 megawatt pumped-hydro plant under construction in New South Wales. Like a giant battery, it can earn money through <abbr title="Buy low, sell high. Here: store cheap electricity, sell it back when it is expensive.">arbitrage</abbr>: store energy when power is cheap, sell it back to the grid when power is expensive. This report estimates what that trade is worth.
+
+We answer this with a backtesting approach using historical prices and asking how the plant would have traded against them. Specifically, we feed four years of real half-hourly NSW spot prices (2022 to 2025) through a Snowy-sized plant, year by year, and measure what arbitrage could have paid under three operating schemes:
+
+1.  **perfect foresight** scheme where the operator knows every future price;
+2.  a simple **rule of thumb** scheme with two price triggers (buy when cheap, sell when dear);
+3.  a **forecaster** scheme where the operator knows the statistical *pattern* of prices but never the actual value.
+
+Each case answers the same question with a different amount of knowledge.
+
+**The perfect foresight** operator is the theoretical best case: for each year it knows the exact sequence of prices and can time every half-hour against it, even holding charge for a spike it sees coming. So, this scheme bounds the maximum arbitrage profit that year could have allowed.
+
+**The rule of thumb** operator knows only price *levels*, not their timing: it pumps whenever the price is among the cheapest hours of the year and generates whenever it is among the dearest. We allow this operator to use the data from the first three years to set its two price triggers, but it never sees the actual 2025 prices. This scheme is a simple, mechanical benchmark: it needs no forecasting at all, and it sets the floor any smarter operator should beat.
+
+**The forecaster** is probably the most realistic operator. It learns the typical time-of-day *shape* of prices from 2022 to 2024, commits to a single standing policy, and is then judged on the untouched 2025; that out-of-sample result is the report's headline.
+
+As such, these three cases let us explore where the **money** comes from. The difference in profits between the rule of thumb and the forecaster scheme pins down the worth of *skill*, and that between the forecaster and the perfect foresight scheme pins down what a perfect price forecast would have been worth (the perfect-foresight gap). The forecaster's profit is the main result of the report.
+
+::: callout-note
+**Profit** throughout means arbitrage profit: revenue from selling electricity, minus the cost of buying it, minus the variable cost of running the machines. Fixed operating costs, capital costs, and financing sit outside the dispatch problem and are not modelled.
+:::
+
+Our measure of **energy-arbitrage** profit only leaves the estimate incomplete in two opposite ways. It under-counts revenue, because frequency-control (FCAS) markets and any capacity or reliability payments are separate income streams we leave out entirely. And it over-counts trading skill, because we assume no outages and no network limits, and, above all, we treat the plant as a price taker: able to buy and sell any amount without moving the price. That is false for a plant this large. When 2,200 MW sells into an expensive evening it pushes that price down, eating into the very gap it is chasing, so every number here over-states what the plant would really earn, and the results should be read as bounds rather than forecasts.
+
+The rest of the report is ordered as follows: we start off with a short background of the plant and the market in which it trades, then discuss the data, illustrate the arbitrage trade on one real day, and finally set out the dispatch model and its results. The appendix contains a glossary, the full assumption audit, a hindsight benchmark for the fixed rule, and data notes.
+
+## Background and Data
+
+### Snowy 2.0
+
+Snowy 2.0 links two existing reservoirs in the Snowy Mountains, Tantangara (upper) and Talbingo (lower), through about 27 kilometres of tunnels and a new underground power station. When power is cheap it pumps water uphill; when power is expensive the water runs back down through the turbines. Snowy Hydro rates the plant at **2,200 MW** of capacity with a headline storage figure of about **350 GWh**, roughly 160 hours of generation at full power ([Snowy Hydro, About Snowy 2.0](https://www.snowyhydro.com.au/snowy-20/about/)). It is Australia's largest renewable-energy project, budgeted at about \$12 billion after several revisions, with full operation expected around 2028 ([project overview](https://en.wikipedia.org/wiki/Snowy_2.0_Pumped_Storage_Power_Station); [SBS News](https://www.sbs.com.au/news/article/snowy-2-0-project-cost-blowout-scrap-debate/gpijiqph2)).
+
+The 350 GWh figure is contested. Critics argue it describes the energy released by draining the upper reservoir once, while the storage that can actually be *cycled* (pumped back up and generated again, repeatedly) may be somewhere between about 40 and 230 GWh ([The Conversation](https://theconversation.com/snowy-2-0-will-not-produce-nearly-as-much-electricity-as-claimed-we-must-hit-the-pause-button-125017)). Snowy Hydro and others dispute that reading ([SBS News](https://www.sbs.com.au/news/article/snowy-2-0-project-cost-blowout-scrap-debate/gpijiqph2)). We take the 350 GWh at face value, and show in the Analysis that the dispute barely moves the answer: arbitrage value comes from *daily* cycling, not from the size of the store.
+
+### NSW spot market
+
+Once operational, Snowy 2.0 will sell into the National Electricity Market (NEM), where a wholesale <abbr title="The market-clearing price for electricity, set every five minutes for each region of the NEM.">spot price</abbr> is set every five minutes for each region. There is a consistent intra-day price swing in that market: renewable generation floods the grid during the middle of the day, pushing prices down, while demand peaks after sunset just as solar disappears, pushing prices up. Those daily swings are the whole business case for storage, as they create the opportunity to buy low in the afternoon and sell high in the evening.
+
+::: callout-note
+The NEM has a price cap and a price floor. The floor is fixed at -\$1,000/MWh. The cap is indexed each July and rose across our window: \$15,100/MWh until June 2022, \$15,500 from July 2022, \$16,600 from July 2023, \$17,500 from July 2024, and \$20,300 from July 2025.
+:::
+
+### Data: NSW spot prices, 2022 to 2025
+
+We load four full years of the New South Wales spot price from the market operator (AEMO), averaged from its five-minute settlements to half-hourly steps. A saved snapshot of each year keeps every run identical (details in the appendix under Data notes).
+
+```{python}
+#| code-summary: "Set up the run: imports, folders, and (on a cloud machine) packages and price snapshots"
+# On a fresh cloud machine (for example Colab) the notebook arrives on its own: no pinned
+# packages and no price snapshots. This cell makes the notebook self-bootstrapping in that case,
+# and does nothing when you already have the repository checked out locally. Everything the report
+# needs is defined in this one notebook, so there is no companion module to fetch.
+import importlib.util, subprocess, sys, urllib.request
+from pathlib import Path
+
+RAW = "https://raw.githubusercontent.com/yobin-tim/snowy-arbitrage/main/python"   # the published repository
+
+def _fetch(relpath: str, dest: Path):
+    """Download python/<relpath> from the repository to dest, unless dest already exists."""
+    if dest.exists():
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    urllib.request.urlretrieve(f"{RAW}/{relpath}", str(dest))
+
+# 1. Packages. If anything the report needs is missing (typically only on a fresh cloud machine),
+#    install the EXACT pinned set from requirements.txt so a cloud run reproduces the same numbers.
+#    Fetch requirements.txt first if it is not already alongside the notebook.
+_missing = [p for p in ("cvxpy", "highspy", "pyarrow", "nemosis") if importlib.util.find_spec(p) is None]
+if _missing:
+    _req = Path("requirements.txt")
+    if not _req.exists():
+        try:
+            _fetch("requirements.txt", _req)          # pull the pinned list onto a bare cloud machine
+        except Exception:
+            _req = None                               # no list available; fall back to a loose install
+    _install = ["-r", str(_req)] if _req and _req.exists() else [*_missing, "pandas", "numpy", "matplotlib"]
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", *_install])
+
+from dataclasses import dataclass, replace
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import cvxpy as cp
+from IPython.display import Markdown, display   # lets us print sentences filled in with live numbers
+
+DATA_DIR = Path("data") if Path("data").exists() else Path("python/data")   # works from python/ or repo root
+CACHE    = DATA_DIR.parent / ".nemosis_cache"       # raw AEMO downloads (git-ignored)
+FIG_DIR  = DATA_DIR.parent / "figures"              # every figure is saved here for the presentation
+FIG_DIR.mkdir(parents=True, exist_ok=True)
+
+# 2. Price snapshots. Fetch the committed parquet for each year so the report reproduces its exact
+#    numbers offline. Without them a cloud run would fall back to a slow live AEMO download instead.
+for _year in (2022, 2023, 2024, 2025):
+    _snap = DATA_DIR / f"nsw1_prices_{_year}_30min.parquet"
+    if not _snap.exists():
+        try:
+            _fetch(f"data/{_snap.name}", _snap)
+        except Exception:
+            pass          # not fatal: the loader below will pull that year live from AEMO if needed
+```
+
+```{python}
+#| code-summary: "Define the shared plotting style and the fixed colour meanings"
+# One shared plotting style so every figure reads as a set: bold black data lines, light fills,
+# a light grid, and a full border around each plot. Colours come from a validated, colour-vision-
+# safe palette, and each colour keeps one fixed meaning throughout.
+INK, INK2, MUTED = "#0b0b0b", "#52514e", "#898781"
+GRID, SURFACE    = "#e1e0d9", "#fcfcfb"
+BUY   = "#2a78d6"   # blue   -> pumping / buying / charging
+SELL  = "#eb6834"   # orange -> generating / selling / discharging
+STORE = "#1baf7a"   # aqua   -> state of charge (how full the store is)
+SPIKE = "#d03b3b"   # red    -> extreme price spikes (the fragile part of the revenue)
+
+plt.rcParams.update({
+    "figure.figsize": (9, 4.2), "figure.dpi": 120,
+    "axes.facecolor": SURFACE, "figure.facecolor": SURFACE,
+    "axes.edgecolor": MUTED, "axes.linewidth": 1.0,   # a full border on every plot
+    "axes.labelcolor": INK, "text.color": INK, "xtick.color": INK2, "ytick.color": INK2,
+    "axes.grid": True, "grid.color": GRID, "grid.linewidth": 0.8,
+    "axes.spines.top": True, "axes.spines.right": True,   # keep the graph bordered
+    "font.size": 11, "axes.titlesize": 13, "axes.titleweight": "bold", "axes.titlepad": 10,
+})
+
+def dollars(x, _=None):
+    '''Format an axis tick as a whole-dollar label: 1500 -> $1,500.'''
+    return f"${x:,.0f}"
+
+def finish(fig, name):
+    '''Save the figure into the presentation pack (python/figures/), then show it here.'''
+    fig.savefig(FIG_DIR / name, dpi=200, bbox_inches="tight", facecolor=SURFACE)
+    plt.show()
+```
+
+```{python}
+#| code-summary: "Load four years of half-hourly NSW prices, downloading each year at most once"
+def ensure_year_prices(year: int) -> pd.Series:
+    '''Return the 30-minute NSW1 price series for `year`. Uses the saved snapshot if it exists,
+    otherwise downloads that year from AEMO, tidies it, saves it, and returns it. Idempotent:
+    safe to call every run, it downloads at most once per year.'''
+    snapshot = DATA_DIR / f"nsw1_prices_{year}_30min.parquet"
+    if snapshot.exists():
+        return pd.read_parquet(snapshot)["price"]
+
+    # ---- first-time download path ----
+    from nemosis import dynamic_data_compiler
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    CACHE.mkdir(parents=True, exist_ok=True)
+    raw = dynamic_data_compiler(
+        f"{year}/01/01 00:00:00", f"{year+1}/01/01 00:00:00", "DISPATCHPRICE",
+        raw_data_location=str(CACHE),
+        select_columns=["SETTLEMENTDATE", "REGIONID", "INTERVENTION", "RRP"],
+        filter_cols=["REGIONID"], filter_values=[["NSW1"]], fformat="parquet")
+    raw = raw[raw["INTERVENTION"] == 0].copy()                 # drop duplicate intervention-pricing rows
+    raw["SETTLEMENTDATE"] = pd.to_datetime(raw["SETTLEMENTDATE"])
+    keep = (raw["SETTLEMENTDATE"] > f"{year}-01-01") & (raw["SETTLEMENTDATE"] <= f"{year+1}-01-01")
+    raw = raw.loc[keep]                                        # clip to exactly one calendar year
+    raw["interval_start"] = raw["SETTLEMENTDATE"] - pd.Timedelta(minutes=5)   # label by interval start
+    # Average the six 5-minute settlements inside each half hour into one 30-minute price.
+    prices = (raw.sort_values("interval_start").set_index("interval_start")["RRP"]
+                 .astype(float).resample("30min").mean().rename("price"))
+    prices.to_frame().to_parquet(snapshot)
+    return prices
+
+YEARS = [2022, 2023, 2024, 2025]
+prices_by_year = {year: ensure_year_prices(year) for year in YEARS}
+price_2024 = prices_by_year[2024]                             # the year we use for close-up plots
+print(f"Loaded {', '.join(map(str, YEARS))}: "
+      f"{sum(len(s) for s in prices_by_year.values()):,} half-hourly prices in total.")
+```
+
+```{python}
+#| code-summary: "Summarise 2024's prices in one live sentence"
+p = price_2024                       # short alias for the close-up year, reused by the figure cells below
+share_negative = (p < 0).mean() * 100
+display(Markdown(
+    f"In 2024, the NSW spot price averaged **\\${p.mean():,.0f}/MWh**, ranged from "
+    f"**\\${p.min():,.0f}** to **\\${p.max():,.0f}/MWh**, and was "
+    f"**below zero {share_negative:.0f}%** of the time."
+))
+```
+
+Before we set up the dispatch model, we look at the raw prices in three ways: the average daily cycle, the distribution of prices within a year, and whether the opportunity persists from year to year. The close-ups use 2024, the most recent training year; the final figure compares all four years.
+
+#### Daily price cycle
+
+The average 2024 day makes the cycle visible: a small peak in the morning, followed by prices sagging through the middle of the day and climbing into the evening. The shaded blocks mark the cheapest and dearest four-hour windows, which are when a storage plant likely buys and sells respectively.
+
+```{python}
+#| code-summary: "Plot the average day and shade the cheapest and dearest blocks"
+# Step 1. The average day: the mean 2024 price at each of the 48 half-hour slots of the day.
+average_by_time = p.groupby(p.index.hour + p.index.minute/60).mean()
+
+# Step 2. Find the two four-hour windows to shade. We use CONTIGUOUS blocks (8 half-hours) so
+# the shading reads as one window each: the cheapest consecutive block anywhere in the day, and
+# the dearest consecutive block after 2 pm (the evening peak, where a storage plant sells).
+window = 8
+running = np.convolve(average_by_time.values, np.ones(window), "valid")   # sum of each 8-slot block
+cheap_start = running.argmin()
+cheapest_hours = average_by_time.index[cheap_start:cheap_start + window]
+afternoon = average_by_time[average_by_time.index >= 14]
+peak_start = np.convolve(afternoon.values, np.ones(window), "valid").argmax()
+evening_peak = afternoon.index[peak_start:peak_start + window]
+
+# Step 3. Draw: the average-day curve, the two shaded windows, and one annotation for each.
+fig, ax = plt.subplots()
+ax.plot(average_by_time.index, average_by_time.values, color=INK, lw=2.2)
+ax.fill_between(average_by_time.index, average_by_time.values,
+                where=average_by_time.index.isin(cheapest_hours),
+                color=BUY, alpha=0.25, label="Cheapest hours (buy)")
+ax.fill_between(average_by_time.index, average_by_time.values,
+                where=average_by_time.index.isin(evening_peak),
+                color=SELL, alpha=0.30, label="Most expensive hours (sell)")
+trough_centre = cheapest_hours[window // 2]            # point the arrow into the shaded trough
+ax.annotate("Solar floods midday",
+            xy=(trough_centre, average_by_time.loc[trough_centre]),
+            xytext=(7.5, average_by_time.max()*0.45),
+            color=BUY, fontsize=9, arrowprops=dict(arrowstyle="->", color=BUY))
+ax.annotate("Evening peak",
+            xy=(average_by_time.idxmax(), average_by_time.max()),   # the true daily peak
+            xytext=(11.5, average_by_time.max()*0.9),
+            color=SELL, fontsize=9, arrowprops=dict(arrowstyle="->", color=SELL))
+ax.set(title="Average NSW Price Through the Day (2024)", xlabel="Hour of day", ylabel="Price ($/MWh)")
+ax.set_xticks(range(0, 24, 3))
+ax.yaxis.set_major_formatter(dollars)
+ax.legend(frameon=False)
+finish(fig, "01-average-day.png")
+```
+
+#### Price distribution
+
+We sort every half hour of the year from most to least expensive and plot the same curve twice below. 
+
+The top panel shows the full range of prices in 2024. A handful of extreme hours dominate the view. 
+
+The bottom panel redraws the same curve with the axis clipped at \$400/MWh. The spikes now run off the top of the chart, and the shape of the ordinary year becomes visible: a gentle slope through the modest band where almost the whole year sits, dipping below zero at the far right. 
+
+As such, prices are modest for most of the year and extreme only occasionally; the Analysis section shows how much of the profit rides on those few extreme hours.
+
+```{python}
+#| code-summary: "Sort 2024's half-hours by price and plot the full range plus the everyday band"
+# Step 1. Sort the year: every half hour of 2024, most expensive first.
+sorted_prices = np.sort(p.values)[::-1]
+hour_rank = np.arange(len(sorted_prices)) * 0.5         # position in the year, in hours
+top_1pct = int(0.01 * len(sorted_prices))               # how many half-hours make up the top 1%
+year_hours = len(sorted_prices) * 0.5                   # true length of the year in hours (leap-safe)
+
+# Step 2. Draw the same curve twice; the panels differ only in the range of the price axis.
+fig, (full, zoom) = plt.subplots(2, 1, figsize=(9, 5.8), height_ratios=[1, 1.25])
+
+# Top panel: the full range. The top 1% is shaded and the single dearest half hour marked,
+# because at this scale the extremes are the only feature the eye can read.
+full.plot(hour_rank, sorted_prices, color=INK, lw=2.2)
+full.fill_between(hour_rank[:top_1pct], sorted_prices[:top_1pct], color=SPIKE, alpha=0.35)
+full.plot(hour_rank[0], sorted_prices[0], marker="o", color=SPIKE, ms=7)
+full.annotate(f"The dearest half-hour reaches\n${sorted_prices[0]:,.0f}/MWh (the market price cap);\nthe shaded band is the top 1% of hours",
+              xy=(hour_rank[0], sorted_prices[0]), xytext=(1400, sorted_prices[0]*0.55),
+              color=SPIKE, fontsize=9, arrowprops=dict(arrowstyle="->", color=SPIKE))
+full.set(title="Every Half-Hour of 2024, Sorted From Most to Least Expensive", ylabel="Price ($/MWh)")
+full.yaxis.set_major_formatter(dollars)
+
+# Bottom panel: the same curve with the axis clipped to the everyday band, so its shape shows.
+# The spikes run off the top on purpose.
+zoom.plot(hour_rank, sorted_prices, color=INK, lw=2.2)
+zoom.axhline(0, color=MUTED, lw=1, ls=":")              # the zero-price line
+zoom.set(ylim=(-100, 400), xlabel=f"Hours of the year (of {year_hours:,.0f})", ylabel="Price ($/MWh)")
+zoom.yaxis.set_major_formatter(dollars)
+zoom.text(4300, 300, "Almost the whole year sits in this modest band", color=INK2, fontsize=9.5, ha="center")
+zoom.text(7900, -70, "prices below zero", color=BUY, fontsize=8.5, ha="center")
+finish(fig, "02-sorted-half-hours.png")
+```
+
+#### The opportunity, year by year
+
+The following graphs show that there is a market opportunity for storage arbitrage. 
+
+The left panel shows the median daily gap between the day's highest and lowest price: **\$210 to \$245/MWh** in each of the four years, which is several times what the round-trip loss costs on a typical cycle. 
+
+The right panel shows the share of half-hours priced below zero, which more than quadruples across the window as solar capacity grows. So the opportunity is structural and increasing over the four years that we have considered in this report.
+
+```{python}
+#| code-summary: "Compute and plot each year's daily spread and share of negative prices"
+# Two summary numbers per year: the median daily high-low gap (the size of the everyday
+# opportunity) and the share of half-hours priced below zero (the cheapening buy side).
+daily_spread, negative_share = [], []
+for year in YEARS:
+    series = prices_by_year[year]
+    by_day = series.groupby(series.index.date)
+    daily_spread.append((by_day.max() - by_day.min()).median())   # the typical day's high-low gap
+    negative_share.append((series < 0).mean() * 100)              # how often the plant is paid to charge
+
+fig, (spread_ax, negative_ax) = plt.subplots(1, 2, figsize=(9, 3.9))
+spread_ax.bar([str(y) for y in YEARS], daily_spread, color=MUTED, edgecolor=INK, linewidth=1.2)
+spread_ax.set(title="Typical Daily Price Spread", ylabel="Median daily high minus low ($/MWh)")
+spread_ax.yaxis.set_major_formatter(dollars)
+negative_ax.bar([str(y) for y in YEARS], negative_share, color=BUY, alpha=0.85, edgecolor=INK, linewidth=1.2)
+negative_ax.set(title="Half-Hours Priced Below Zero", ylabel="Share of the year (%)")
+finish(fig, "03-opportunity-by-year.png")
+```
+
+Taken together, this pins down the key reasons for an arbitrage opportunity: a daily cycle that reliably pairs cheap afternoons with expensive evenings, a thin set of extreme hours carrying outsized prices, and a buy side that gets cheaper each year. 
+
+What they do not show is how a plant converts that opportunity into profit, or what the round-trip loss takes on the way. The next section works through both on a single winter day.
+
+## Storage Arbitrage: An Illustration
+
+Before setting out the model, we walk through the trade itself on one real day. The section fixes the two ideas everything later rests on: the mechanics, where buying cheap half-hours fills the store and selling dear ones drains it, with the store's level tying each decision to the ones around it; and the economics, where a price gap becomes profit only once it clears the round-trip loss.
+
+### One day's trade (10 July 2024)
+
+We take one real winter day and rank its 48 half-hours by price: the plant buys during the ten cheapest (blue) and sells during the ten dearest (orange). The ranking uses the whole day at once, so it is hindsight rather than one of the three schemes; it is the trade itself at its simplest, the thing every scheme in the Analysis is trying to find. The dearest half-hours cluster in the morning and evening peaks, with the cheapest in the solar-flooded middle of the day. The lower panel tracks the <abbr title="How full the store is right now, in megawatt-hours.">state of charge</abbr> this produces: the store starts the day partly charged, sells through a brief midnight spike and the morning peak, refills across the cheap midday hours, and drains again into the evening peak, ending the day exactly as charged as it began (the same start-equals-end convention the dispatch model later imposes on each year).
+
+```{python}
+#| code-summary: "Sketch one real day's trade: rank the half-hours, buy the 10 cheapest, sell the 10 dearest"
+# Step 1. Pick the day and rank its 48 half-hours by price, using the whole day at once.
+# That is hindsight, not one of the three schemes: the point is to show the trade itself.
+one_day = p.loc["2024-07-10"]
+window = 10                                        # trade 10 half-hours on each side
+cheap_slots = one_day.nsmallest(window).index      # when the plant buys (store fills)
+pricey_slots = one_day.nlargest(window).index      # when the plant sells (store drains)
+
+# Step 2. Track the store at each half-hour boundary: up one notch after a buy, down one
+# after a sell. Lifting the whole path so it never dips below empty is the same as saying
+# the store began the day partly charged; with ten buys and ten sells it also ends the day
+# exactly where it started.
+boundary_level = [0.0]
+for t in one_day.index:
+    boundary_level.append(boundary_level[-1] + (1 if t in cheap_slots else -1 if t in pricey_slots else 0))
+boundary_level = np.array(boundary_level) - min(boundary_level)
+
+# Step 3. Draw. Each half hour has one settled price, so the price is drawn as a step, and
+# the shaded buy/sell columns cover exactly their own half hours; the store line below then
+# rises and falls precisely under those columns.
+hour_of_day = one_day.index.hour + one_day.index.minute/60
+edge_hours = np.append(hour_of_day, 24.0)          # the 49 half-hour boundaries of the day
+fig, (price_ax, store_ax) = plt.subplots(2, 1, sharex=True, figsize=(9, 5.2), height_ratios=[2, 1])
+price_ax.plot(hour_of_day, one_day.values, color=INK, lw=2.2, drawstyle="steps-post")
+price_ax.fill_between(hour_of_day, one_day.values, where=one_day.index.isin(cheap_slots),
+                      step="post", color=BUY, alpha=0.30, label="Buy (cheap)")
+price_ax.fill_between(hour_of_day, one_day.values, where=one_day.index.isin(pricey_slots),
+                      step="post", color=SELL, alpha=0.35, label="Sell (expensive)")
+price_ax.set(title="One Winter Day: Buy Low, Sell High (Illustrative Sketch)", ylabel="Price ($/MWh)")
+price_ax.yaxis.set_major_formatter(dollars)
+price_ax.legend(frameon=False, ncol=1, loc="upper left")
+store_ax.fill_between(edge_hours, boundary_level, color=STORE, alpha=0.5)
+store_ax.plot(edge_hours, boundary_level, color=STORE, lw=2.2)
+store_ax.set(xlabel="Hour of day", ylabel="State of charge\n(illustrative)")
+store_ax.set_yticks([])
+store_ax.set_xticks(range(0, 24, 3))
+# stamp the sketch so the PNG can never pass as model output on a slide
+store_ax.text(0.99, 0.88, "sketch of the idea, not model output", transform=store_ax.transAxes,
+              ha="right", va="top", color=INK2, fontsize=8.5, style="italic")
+finish(fig, "04-one-day-trade.png")
+```
+
+### Losses and the minimum profitable spread
+
+We sort the day's prices from cheap to expensive. We buy across the cheap block on the left and sell across the expensive block on the right; the vertical gap between the blocks is the **price gap**, the raw spread per megawatt-hour traded. Storage is leaky: Snowy's <abbr title="How much of the stored energy comes back out. Snowy 2.0 returns about 77% of what it stores; the rest is lost to friction and pumping losses.">round-trip efficiency</abbr> is about **77%**: of every megawatt-hour bought, only 0.77 comes back out. Breaking even therefore needs the sell price to beat the buy price by about **30%** (one divided by 0.77), not merely by the 23% lost on the way through. Only the spread beyond that hurdle is profit, and when the gap falls short of it, the rational move is to do nothing.
+
+```{python}
+#| code-summary: "Sort the day's prices and mark the price gap between the buy and sell blocks"
+# Step 1. Sort the day from cheapest to dearest half hour; the traded blocks sit at the two
+# ends, and the gap between their average price levels is the raw spread, BEFORE losses.
+day_sorted = np.sort(one_day.values)
+buy_price, sell_price = day_sorted[:window].mean(), day_sorted[-window:].mean()
+
+# Step 2. Draw: the sorted curve, the two traded blocks, and the price gap between them.
+fig, ax = plt.subplots()
+ax.plot(range(len(day_sorted)), day_sorted, color=INK, lw=2.2)
+ax.fill_between(range(window), day_sorted[:window], color=BUY, alpha=0.30, label="Buy (cheapest hours)")
+ax.fill_between(range(len(day_sorted)-window, len(day_sorted)), day_sorted[-window:],
+                color=SELL, alpha=0.35, label="Sell (priciest hours)")
+ax.annotate("", xy=(len(day_sorted)-window/2, sell_price), xytext=(len(day_sorted)-window/2, buy_price),
+            arrowprops=dict(arrowstyle="<->", color=SPIKE, lw=2))
+ax.text(len(day_sorted)-window, (buy_price+sell_price)/2,
+        f"  Price gap\n  ~${sell_price-buy_price:,.0f}/MWh",
+        color=SPIKE, fontsize=10, va="center")
+ax.set(title="The Same Day, Prices Sorted From Cheap to Expensive",
+       xlabel="Half-hours of the day, sorted", ylabel="Price ($/MWh)")
+ax.yaxis.set_major_formatter(dollars)
+ax.legend(frameon=False, loc="upper left")
+finish(fig, "05-gap-vs-losses.png")
+```
+
+That is the whole trade in miniature: fill the store when the price is low, drain it when the price is high, and act only when the spread clears the loss hurdle. What the sketch cannot say is how an operator should pick those hours without seeing the day in advance, or how the plant's power rating and reservoir size limit the trade. The Model takes up both.
+
+## The Model
+
+This section sets the whole problem out in one place: the plant's parameters, the dispatch problem every scheme solves, the assumptions behind it, and the one economic idea (the water value of stored energy) that turns the physics into decisions.
+
+### Plant parameters
+
+The model needs five primitives: the power rating $P$, the dischargeable storage $E_{\max}$, the round-trip efficiency $\eta$, the variable cost $c_{\text{om}}$, and the time step $\Delta t$. Physical figures are Snowy 2.0's public specifications; the cost figure is set at the high end of published estimates.
+
+| Parameter | Value | Note |
+|------------------------|------------------------|------------------------|
+| Power rating $P$ | 2,200 MW | Snowy 2.0 nameplate (rated) capacity, assumed the same for pumping and generating (A6). |
+| Dischargeable storage $E_{\max}$ | 350 GWh | Snowy's headline figure; the cyclable capacity is contested, so we test it in Scheme 1's storage-capacity sensitivity (A4). |
+| Round-trip efficiency $\eta$ | 77% | Reported for the plant; split evenly across the two legs ($\eta_{\text{pump}} = \eta_{\text{gen}} = \sqrt{\eta}$), which does not affect revenue (A3). |
+| Variable cost $c_{\text{om}}$ | \$4 / MWh generated | High end of the published range for pumped hydro, so conservative here. |
+| Time step $\Delta t$ | 30 minutes | We average the 5-minute market price to half-hourly steps, which smooths sub-half-hour spikes and mildly *under*-states the ceiling. |
+
+Fixed operating costs and the up-front capital cost are left out on purpose: they are the same whatever the plant dispatches, so they matter for whether the project pays off overall, but not for the best operating schedule, which is all this model chooses.
+
+```{python}
+#| code-summary: "Define the plant: Snowy 2.0's specifications as a StoragePlant record"
+@dataclass(frozen=True)
+class StoragePlant:
+    '''Physical description of a storage plant. Defaults are Snowy 2.0.'''
+    power_mw: float = 2200.0            # pump and generate power rating (symmetric here), MW
+    dischargeable_mwh: float = 350_000  # usable generation energy (Snowy's 350 GWh, taken at face value)
+    eta_pump: float = 0.77 ** 0.5       # pumping-leg efficiency  (square root of the 0.77 round trip)
+    eta_gen:  float = 0.77 ** 0.5       # generating-leg efficiency (product of the two legs = 0.77)
+    var_om_per_mwh: float = 4.0         # variable O&M per MWh generated, $/MWh
+    interval_hr: float = 0.5            # half-hourly dispatch
+
+    @property
+    def eta_roundtrip(self) -> float:
+        return self.eta_pump * self.eta_gen
+
+    @property
+    def max_stored_energy(self) -> float:
+        # We track stored *potential* energy (the intuitive two-term balance above). The reservoir
+        # holds up to `dischargeable_mwh` of generatable energy, i.e. dischargeable / eta_gen here.
+        return self.dischargeable_mwh / self.eta_gen
+
+snowy = StoragePlant()
+hours_full_power = round(snowy.dischargeable_mwh / snowy.power_mw, -1)   # ~159, rounded to the nearest ten
+print(f"Snowy 2.0: {snowy.power_mw:,.0f} MW, {snowy.dischargeable_mwh/1e3:.0f} GWh, "
+      f"round trip {snowy.eta_roundtrip:.0%}, about {hours_full_power:.0f} hours at full power.")
+```
+
+### The dispatch problem
+
+Every scheme chooses the same two quantities for **every half hour** of the year: how hard to pump, $u_t$ (megawatts bought), and how hard to generate, $g_t$ (megawatts sold). The objective is profit. As always,
+
+$$ \text{profit} = \text{revenue} - \text{cost}. $$
+
+**Revenue.** Only generating earns money. Selling $g_t$ megawatts for $\Delta t$ hours at the spot price $p_t$ brings in $p_t\, g_t\, \Delta t$, so over the year
+
+$$ \text{revenue} = \sum_t p_t\, g_t\, \Delta t . $$
+
+**Cost.** Two costs change with the schedule: the electricity bought to pump ($u_t$), and variable operations and maintenance on what is generated:
+
+$$ \text{cost} = \sum_t p_t\, u_t\, \Delta t \;+\; c_{\text{om}} \sum_t g_t\, \Delta t . $$
+
+Putting them together, the operator maximises
+
+$$ \text{profit} = \sum_t p_t\,(g_t - u_t)\,\Delta t \;-\; c_{\text{om}} \sum_t g_t\, \Delta t . $$
+
+**The constraints.** Four constraints complete the problem, and each is ordinary physics.
+
+1.  **Power.** Pump or generate at most the rating: $0 \le u_t \le P$ and $0 \le g_t \le P$.
+2.  **The store fills and drains.** Let $s_t$ be the energy in the reservoir at the start of interval $t$. It changes by what flows in minus what flows out: $$ s_{t+1} = s_t + \eta_{\text{pump}}\, u_t\, \Delta t \;-\; \frac{g_t}{\eta_{\text{gen}}}\, \Delta t . $$ Pumping adds only the fraction $\eta_{\text{pump}}$ of the energy bought; generating draws $1/\eta_{\text{gen}}$ from the store per unit sold. Pump in then generate out and you keep $\eta_{\text{pump}}\eta_{\text{gen}} = 0.77$, the round trip. (One wording note: $s_t$ tracks *potential* energy, the energy sitting in the reservoir; the *generatable* energy that could be sold from it is smaller by the factor $\eta_{\text{gen}}$.)
+3.  **Capacity.** The store never overflows or goes negative: $0 \le s_t \le E_{\max}/\eta_{\text{gen}}$. Since $s_t$ is potential energy, the cap is the level at which the store holds exactly $E_{\max} = 350$ GWh of generatable energy.
+4.  **A repeating year.** Require $s_1 = s_{T+1}$: end the year with the store as full as it began.
+
+All three schemes in the Analysis are evaluated by the same profit measure and face the same physical and year-end constraints. They differ along two dimensions: the price information available when dispatch is chosen, and the flexibility of the policy that turns that information and the reservoir state into an action (a continuous feasible schedule in Scheme 1, two fixed triggers in Scheme 2, a learned state-dependent action map in Scheme 3).
+
+### Assumptions
+
+The assumptions that genuinely move the answer are stated up front, each with the reason we make it, the direction it pushes the estimate, and whether we test it. The bracketed labels key each one to the full audit of all fourteen (A1 to A14) in the Appendix, which later sections cite by label.
+
+- **Snowy is a price taker (A1).** The plant can buy and sell any amount without moving the price: the standard first pass, and it keeps every scheme fast and clean. **Over-states** profit, probably by a lot; untested here, pending a price-impact model.
+- **Storage is 350 GWh, taken at face value (A4).** Snowy's headline figure, though the cyclable capacity is disputed. Possibly over-states profit; tested in Scheme 1's storage-capacity sensitivity, and shown non-binding there.
+- **A frictionless plant (A8, A11, A12).** No ramp, minimum-load, or start-up limits; no planned or forced outages; no network limits on clearing at the NSW regional price. Each **over-states** profit; none is tested here.
+
+Perfect foresight (A2) is deliberately not on this list: it is not an assumption of the analysis but the definition of Scheme 1, and Scheme 3 exists to remove it. Every assumption above pushes the same way, which is why even the rule of thumb here leans in the project's favour. A1 does most of the work, and we return to it at the end.
+
+### Water value
+
+The constraints say what the plant *can* do. Deciding what it *should* do comes down to one question: what is a stored megawatt-hour worth? Hydro traders call that number the **water value**, and it answers every decision at once: sell only when the price beats it, buy only when the price sits far enough below it to survive the round-trip loss, and otherwise wait. The forecaster in Scheme 3 is this calculation industrialised, with the water value shifting with the time of day, the current price, and how full the store is. The folded example below works the number out once, in the simplest possible market.
+
+::: {.callout-note collapse="true"}
+#### A two-price example
+
+Suppose one dischargeable megawatt-hour held now must be sold tonight, when the price will be either **\$50 or \$300 per MWh, with equal odds**. Its expected sale margin, after the **\$4/MWh** variable operating cost, is $\tfrac{1}{2}(50 - 4) + \tfrac{1}{2}(300 - 4) = \$171/\text{MWh}$. That expected margin is the water value, here in dischargeable-output units, and it answers both decisions. Sell now only if the current sale margin beats \$171/MWh, that is, only if the price beats about **\$175/MWh**, since that is what the energy earns on average by waiting. Pump now only when it pays: buying one megawatt-hour delivers just 0.77 of one for later sale after the round-trip loss, worth 0.77 × \$171 ≈ **\$132**, so buy only below about \$132/MWh. Between roughly \$132 and \$175/MWh, do nothing.
+
+(One unit note: the constraints above track *potential* energy $s_t$ rather than dischargeable output, so in those units the water value is smaller by the factor $\eta_{\text{gen}}$; the economic decision is unchanged.)
+:::
+
+## Analysis
+
+### The three dispatch schemes
+
+Every scheme below trades the same plant against the same prices; they differ in what the operator is allowed to know, and in how freely its policy can act on that knowledge, the two dimensions set out at the end of The Model. Those differences are what we are measuring.
+
+|   | Scheme | The operator knows | Sees the year it trades? | Role here |
+|--------|-------------|-------------------------|----------------|----------------|
+| **S1** | Perfect foresight | Every future price, exactly | Yes, perfectly | The **ceiling**: no strategy can beat it |
+| **S2** | Rule of thumb | Two trigger prices, frozen on 2022 to 2024 | **No** | The deployable **baseline**: honest to beat |
+| **S3** | The forecaster | The statistical pattern of prices, never the actual path | **No**: 2025 fully held out | The **central estimate** |
+
+The "Sees the year it trades?" column is about dispatch decisions: only S1 uses the scored year's actual prices to choose when to trade, so its profit flatters it. S2 and S3 both fix their decision rule before 2025, S2 as two frozen price triggers and S3 as a learned pattern, and react only to information available at each half-hour. All three do use the realised annual path, ex post, for one accounting step: choosing a start = end reservoir level so no year banks uncredited inventory. That choice can shift the starting stock, and so the realised reservoir path and trades, but it never changes the frozen rules or supplies future prices when a trade is chosen.
+
+Two gaps between the schemes carry the meaning. The gap from S2 up to S3 is the value of trading *intelligently* on the pattern rather than mechanically. The gap from S3 up to S1 is the realised value of a perfect forecast (the **perfect-foresight gap**): how much money knowing the future would actually have been worth. If that second gap turns out small, foresight is not the binding constraint on this project, and the bigger worries live elsewhere (Assumption A1 above).
+
+### Scheme 1: Perfect foresight
+
+We start from the impossible best case. It takes the dispatch problem above and adds one extraordinary information assumption (A2): the optimiser receives the entire realised price path before choosing the year's schedule, so it can time every half hour against prices no real operator could know. Every term in the objective and the constraints is a straight line in the decisions, so this is a <abbr title="An optimisation problem whose objective and constraints are all straight-line (linear) expressions; solvers handle these exactly and quickly.">linear program</abbr>, which a solver handles exactly in about a second. Within the common constraints, this scheme may also choose any feasible pumping or generation level in every half hour; it is not restricted to fixed triggers or a learned action map, so its advantage over the later schemes is one of policy freedom as well as information.
+
+::: {.callout-note collapse="true"}
+#### Why no "do not pump and generate at once" rule is needed
+
+While the price is positive it never pays to pump and generate in the same interval: cutting both by the same amount leaves revenue unchanged but *adds* energy to the store (the round-trip loss saved), which only helps later. When the price is negative that argument breaks down: a plant that is paid to consume could in principle pump and generate at once purely to dissipate energy, and the optimiser would take that deal. Rather than complicate the program with an either-or rule (which would destroy its linearity), we verify the schedules it actually produces: in all four solved years the plant never pumps and generates in the same half hour, and the solver code below asserts that on every run.
+:::
+
+The solver below is a direct transcription of the dispatch problem in The Model.
+
+```{python}
+#| code-summary: "Solve the dispatch problem as a linear program: the perfect-foresight solver"
+def solve_perfect_foresight(prices: np.ndarray, plant: StoragePlant, cyclic: bool = True) -> dict:
+    '''Best arbitrage schedule with every price known in advance (the ceiling). Returns total
+    profit and the half-hourly pump / generate / stored-energy paths. Mirrors the equations above.'''
+    n  = len(prices)
+    dt = plant.interval_hr
+    P  = plant.power_mw
+
+    # Decisions the solver chooses, one value per half hour:
+    pump_power = cp.Variable(n, nonneg=True)      # buy / charge, MW
+    gen_power  = cp.Variable(n, nonneg=True)      # sell / discharge, MW
+    stored     = cp.Variable(n + 1, nonneg=True)  # stored potential energy at each boundary, MWh
+
+    constraints = [
+        pump_power <= P, gen_power <= P,          # (1) power rating
+        stored <= plant.max_stored_energy,        # (3) reservoir capacity
+        # (2) energy balance, exactly the two-term equation: inflow adds eta_pump of what we buy,
+        #     outflow draws 1/eta_gen of the store per unit generated.
+        stored[1:] == stored[:-1] + plant.eta_pump * pump_power * dt - (gen_power / plant.eta_gen) * dt,
+    ]
+    # (4) a repeating year: end as full as it began (or pin both ends empty if cyclic=False)
+    constraints += [stored[0] == stored[n]] if cyclic else [stored[0] == 0, stored[n] == 0]
+
+    # profit = sales - purchases - variable O&M on generation
+    sales     = cp.sum(cp.multiply(prices, gen_power) * dt)
+    purchases = cp.sum(cp.multiply(prices, pump_power) * dt)
+    variable_om = plant.var_om_per_mwh * cp.sum(gen_power * dt)
+    problem = cp.Problem(cp.Maximize(sales - purchases - variable_om), constraints)
+    problem.solve(solver=cp.HIGHS)
+
+    g, u, s = gen_power.value, pump_power.value, stored.value
+    return {"status": problem.status, "profit": float(problem.value),
+            "gen": g, "pump": u, "stored": s,
+            "net_dollars": prices * (g - u) * dt - plant.var_om_per_mwh * g * dt,
+            "generation_twh": g.sum() * dt / 1e6,
+            "capacity_factor": g.sum() * dt / (P * len(prices) * dt),
+            # volume-weighted average prices; NaN rather than a crash if a leg never runs
+            "mean_sell": (g * prices).sum() / g.sum() if g.sum() > 0 else float("nan"),
+            "mean_buy":  (u * prices).sum() / u.sum() if u.sum() > 0 else float("nan")}
+
+check = solve_perfect_foresight(price_2024.to_numpy(), snowy)
+print("2024 solver status:", check["status"])   # expect 'optimal'
+```
+
+#### The ceiling, 2022 to 2025
+
+Rather than trust one year, we run the model on four. We report the answer as a **band** rather than a single number, because a large slice of the top of it depends on a few extreme-price hours that Snowy itself would erase.
+
+Two reading notes for the table. **Ceiling** and **Ex-spikes** are the pair to compare: the difference between them is how much of the ceiling rides on a handful of extreme hours. The last three columns (the <abbr title="Average output as a share of maximum. 20% means the plant generates, on average, a fifth of flat out.">capacity factor</abbr> and the average buy and sell prices) return at the end of the report as the backtest's summary statistics.
+
+```{python}
+#| code-summary: "Solve all four years, with and without the extreme top 1% of prices"
+# Solve every year twice: with all prices, and with the top 1% of spikes trimmed to the
+# 99th-percentile price (the part where the price-taker assumption is least believable).
+ceiling_by_year, rows = {}, []
+for year in YEARS:
+    year_prices = prices_by_year[year].to_numpy()
+    full = solve_perfect_foresight(year_prices, snowy)
+    trimmed = solve_perfect_foresight(np.minimum(year_prices, np.percentile(year_prices, 99)), snowy)
+    # The LP has no rule against pumping and generating at once (see the fold above);
+    # verify on every run that the optimum never actually does it.
+    for r in (full, trimmed):
+        assert float(np.minimum(r["pump"], r["gen"]).max()) < 1e-6, \
+            f"{year}: the LP pumped and generated simultaneously; review the ceiling"
+    ceiling_by_year[year] = full                                   # kept for the scheme comparison later
+    rows.append({"Year": year, "Ceiling ($bn)": full["profit"]/1e9, "Ex-spikes ($bn)": trimmed["profit"]/1e9,
+                 "Capacity factor": full["capacity_factor"], "Mean buy ($/MWh)": full["mean_buy"],
+                 "Mean sell ($/MWh)": full["mean_sell"]})
+panel = pd.DataFrame(rows).set_index("Year")
+panel.round(2)
+```
+
+```{python}
+#| code-summary: "State the ceiling band in one live sentence"
+low, high = panel["Ceiling ($bn)"].min(), panel["Ceiling ($bn)"].max()
+trim_low, trim_high = panel["Ex-spikes ($bn)"].min(), panel["Ex-spikes ($bn)"].max()
+display(Markdown(
+    f"**The ceiling: \\${low:.1f} bn to \\${high:.1f} bn of arbitrage profit per year** including "
+    f"every extreme spike, or **\\${trim_low:.1f} to \\${trim_high:.1f} bn** with the most extreme "
+    f"1% of hours trimmed. No operating strategy can beat this; the next two schemes measure how "
+    f"much of it an operator can capture without seeing the future."
+))
+```
+
+#### Profit concentration
+
+Sort 2024's half-hours from most to least profitable and add them up. The curve shows the share of the whole year's profit earned by the best few hours. It rises almost vertically: a tiny sliver of the year earns most of the money, and those are exactly the extreme-price hours where the price-taker assumption breaks down worst. (The chart shows the first 1,500 hours; the curve keeps climbing gently to 100% across the full year.)
+
+```{python}
+#| code-summary: "Rank 2024's half-hours by profit and plot the cumulative share"
+# Rank 2024's half-hours by the profit each contributed, then accumulate: the curve's height
+# at x is the share of the whole year's profit earned by its x most profitable hours.
+result_2024 = ceiling_by_year[2024]
+profit_sorted = np.sort(result_2024["net_dollars"])[::-1]
+total_year_hours = len(profit_sorted) * 0.5                     # leap-safe length of the year in hours
+cumulative_share = np.cumsum(profit_sorted) / profit_sorted.sum() * 100
+hours_ranked = np.arange(1, len(profit_sorted)+1) * 0.5
+hours_for_half = hours_ranked[np.searchsorted(cumulative_share, 50)]   # hours that earn half the profit
+
+fig, ax = plt.subplots()
+ax.plot(hours_ranked, cumulative_share, color=INK, lw=2.5)                       # bold black data line
+ax.axhline(50, color=MUTED, lw=1, ls=":")
+ax.axvline(hours_for_half, color=SPIKE, lw=1, ls=":")
+ax.fill_between(hours_ranked, cumulative_share, where=(hours_ranked <= hours_for_half), color=SPIKE, alpha=0.2)
+ax.annotate(f"The best ~{hours_for_half:,.0f} hours\n(~{hours_for_half/total_year_hours*100:.0f}% of the year)\nearn half the profit",
+            xy=(hours_for_half, 50), xytext=(360, 24), color=SPIKE, fontsize=10,
+            arrowprops=dict(arrowstyle="->", color=SPIKE))
+ax.set(title="A Few Hours Earn Most of the Money (2024)", xlabel="Most profitable hours of the year",
+       ylabel="Share of the year's profit (%)", xlim=(0, 1500), ylim=(0, 101))
+finish(fig, "06-profit-concentration.png")
+```
+
+#### Sensitivity to storage capacity
+
+Snowy's headline 350 GWh is contested: the cyclable capacity may be far smaller (see Background and Data). Re-running 2024 with much smaller stores barely changes the result, because the value is in **daily** cycling, not in holding energy for weeks. The headline figure can therefore be taken at face value without the answer leaning on it.
+
+```{python}
+#| code-summary: "Re-solve 2024 with a 50, 175, and 350 GWh store"
+# Re-solve the 2024 ceiling with progressively smaller reservoirs and report each result as a
+# share of the 350 GWh answer: if the share stays high, the contested size does not matter.
+full_ceiling = ceiling_by_year[2024]["profit"]
+storage_rows = []
+for gwh in (50, 175, 350):
+    smaller = solve_perfect_foresight(price_2024.to_numpy(), replace(snowy, dischargeable_mwh=gwh*1000))
+    storage_rows.append({"Storage (GWh)": gwh, "Ceiling ($bn)": round(smaller["profit"]/1e9, 2),
+                         "Share of 350 GWh result": f"{round(smaller['profit']/full_ceiling*100)}%"})
+pd.DataFrame(storage_rows).set_index("Storage (GWh)")
+```
+
+#### The optimal schedule over one week
+
+Over one real week, the model fills the store (green line) when prices dip and empties it into the peaks. Blue is pumping (buying), orange is generating (selling).
+
+```{python}
+#| code-summary: "Plot one week of the optimal plan: price, dispatch, and state of charge"
+# One winter week of the optimal plan: the price on top; below it, pumping (down, blue) and
+# generating (up, orange) with the reservoir level drawn over them as a green line.
+week = slice("2024-07-08", "2024-07-14")
+week_index = price_2024.loc[week].index
+pos = price_2024.index.get_indexer(week_index)
+store_gwh = result_2024["stored"][pos] * snowy.eta_gen / 1e3        # show the store in generatable GWh (Snowy's units)
+
+fig, (price_ax, dispatch_ax) = plt.subplots(2, 1, sharex=True, figsize=(9, 5.4), height_ratios=[2, 1])
+price_ax.plot(week_index, price_2024.loc[week].values, color=INK, lw=1.6)         # title + ylabel already say "Price"
+price_ax.set(title="One Week of the Optimal Plan (8-14 July 2024)", ylabel="Price ($/MWh)")
+price_ax.yaxis.set_major_formatter(dollars)
+# lighter dispatch fills so the state-of-charge line reads on top of them
+dispatch_ax.fill_between(week_index, 0, -result_2024["pump"][pos], color=BUY,  step="mid", alpha=0.5, label="Pump (buy)")
+dispatch_ax.fill_between(week_index, 0,  result_2024["gen"][pos],  color=SELL, step="mid", alpha=0.5, label="Generate (sell)")
+dispatch_ax.axhline(0, color=MUTED, lw=0.8)
+dispatch_ax.set(ylabel="Power (MW)")
+store_ax = dispatch_ax.twinx()                                                    # state of charge as a bold green line
+store_ax.plot(week_index, store_gwh, color=STORE, lw=2.2)
+store_ax.fill_between(week_index, 0, store_gwh, color=STORE, alpha=0.12)
+store_ax.set_ylabel("State of charge (GWh)", color=STORE)
+store_ax.tick_params(axis="y", colors=STORE)
+store_ax.spines["right"].set_color(STORE)
+# in-figure legend, because this PNG travels to slides without its caption
+from matplotlib.patches import Patch
+dispatch_ax.legend(handles=[Patch(color=BUY, alpha=0.5, label="Pump (buy)"),
+                            Patch(color=SELL, alpha=0.5, label="Generate (sell)"),
+                            plt.Line2D([], [], color=STORE, lw=2.2, label="State of charge")],
+                   frameon=False, loc="upper left", ncol=3, fontsize=8.5, bbox_to_anchor=(0, 1.22))
+fig.autofmt_xdate()
+finish(fig, "07-optimal-week.png")
+```
+
+### Scheme 2: The rule of thumb
+
+The opposite extreme is an operator with two fixed trigger prices and no discretion. Buy at full power whenever the price sits at or below the cheaper trigger, sell whenever it sits at or above the dearer one, do nothing in between. The triggers are set the way a real operator would have to set them: chosen once on the training years (2022 to 2024), frozen, and then applied unchanged. So this is not a rule tuned with hindsight to the year it trades; it commits to its prices in advance and is judged out of sample on the held-out 2025, exactly as the forecaster is. It reacts only to the current price against its two fixed levels: it never learns the time-of-day pattern and never forecasts the coming sequence. Its role is to show what plain mechanical trading at sensible price levels would have earned, so the forecaster that follows has an honest, deployable baseline to beat.
+
+```{python}
+#| code-summary: "Build, train, and score the rule of thumb (triggers frozen on 2022 to 2024)"
+# ---- Part 1. Simulate one year of the two-trigger rule ----
+def threshold_dispatch(prices, plant, buy_below, sell_above, start_soc=0.0):
+    '''A fixed-threshold rule with explicit DOLLAR triggers, run from a given start level: buy at
+    full power whenever the price is at or below `buy_below`, sell whenever it is at or above
+    `sell_above`, idle in between. The triggers are fixed dollars, so they can be frozen on the
+    training years rather than read off the year being scored, and returning the reservoir path
+    (with a `start_soc`) lets us impose the same start = end boundary the other two schemes use.'''
+    dt, P = plant.interval_hr, plant.power_mw
+    max_store, eta_pump, eta_gen = plant.max_stored_energy, plant.eta_pump, plant.eta_gen
+    stored, profit = float(start_soc), 0.0
+    path = np.empty(len(prices) + 1)                               # reservoir level at each boundary
+    path[0] = stored
+    for i, price in enumerate(prices):
+        if price <= buy_below and stored < max_store:              # at or below buy trigger, room left: buy
+            mw = min(P, (max_store - stored) / (eta_pump * dt))    # full power, or just enough to fill up
+            stored += eta_pump * mw * dt                           # only eta_pump of the buy arrives
+            profit -= price * mw * dt                              # pay for the electricity bought
+        elif price >= sell_above and stored > 0:                   # at or above sell trigger, energy held: sell
+            mw = min(P, stored * eta_gen / dt)                     # full power, or just what is left
+            stored -= (mw / eta_gen) * dt                          # each MWh sold draws 1/eta_gen from store
+            profit += price * mw * dt - plant.var_om_per_mwh * mw * dt   # earn the price, net of O&M
+        path[i + 1] = stored
+    return {"profit": profit, "stored": path}
+
+
+# ---- Part 2. The start = end boundary search, shared by Schemes 2 and 3 ----
+def find_cyclic_boundary(run_year, plant, tol_dis_mwh=100.0,
+                         start_fracs=(0.0, 0.25, 0.5, 0.75, 1.0), max_iters=40):
+    '''Impose the REPEATED-YEAR (start = end reservoir) boundary on any dispatch rule, so every
+    scheme is compared on identical accounting. `run_year(start_soc)` simulates one year from
+    that starting level and returns at least the reservoir path ("stored") and the year's
+    "profit". From several starting levels, iterate start = end until the year's end level
+    matches its start within `tol_dis_mwh` dischargeable MWh, falling back to the
+    smallest-residual run if none settles. A dispatch rule can in principle have several
+    self-consistent start = end levels, so a single small residual proves a fixed point exists
+    but not that the cyclic profit is unique; we therefore report whether every starting level
+    settled to the same economic outcome (`unique_fixed_point`), so a non-unique fixed point
+    cannot pass silently.'''
+    eg = plant.eta_gen
+    runs = []                                                       # one record per starting level
+    for frac in start_fracs:
+        start = frac * plant.max_stored_energy
+        out = run_year(start)
+        end = float(out["stored"][-1])
+        residual_dis = abs(end - start) * eg                        # start-vs-end gap, dischargeable MWh
+        it = 1
+        while residual_dis >= tol_dis_mwh and it < max_iters:
+            start = end                                             # feed the end level back in as the start
+            out = run_year(start)
+            end = float(out["stored"][-1])
+            residual_dis = abs(end - start) * eg
+            it += 1
+        runs.append({"start": start, "end": end, "outcome": out,
+                     "residual_dis_mwh": residual_dis, "iterations": it})
+    best = min(runs, key=lambda r: r["residual_dis_mwh"])           # smallest-residual fallback if none converged
+    # A unique fixed point means every starting level settled to the same shallow basin: all the
+    # settled levels within a few grid steps of each other AND their profits agreeing to 0.1%.
+    basin_width = (max(r["start"] for r in runs) - min(r["start"] for r in runs)) * eg
+    profits = [r["outcome"]["profit"] for r in runs]
+    unique = (basin_width < 5 * tol_dis_mwh
+              and (max(profits) - min(profits)) < 0.001 * abs(best["outcome"]["profit"]))
+    return {**best["outcome"], "start_soc": best["start"], "end_soc": best["end"],
+            "residual_dis_mwh": best["residual_dis_mwh"], "iterations": best["iterations"],
+            "converged": best["residual_dis_mwh"] < tol_dis_mwh,
+            "unique_fixed_point": unique,
+            "basin_dis_mwh": basin_width,                           # spread of the settled levels
+            "profit_spread": (max(profits) - min(profits)) / abs(best["outcome"]["profit"]),
+            "all_starts": [(r["start"], r["end"], r["outcome"]["profit"]) for r in runs]}
+
+
+def cyclic_threshold_score(prices, plant, buy_below, sell_above):
+    '''Score a dollar-threshold rule under the repeated-year convention: run the fixed triggers
+    through the start = end search above, with all of its convergence and uniqueness checks.'''
+    return find_cyclic_boundary(
+        lambda start: threshold_dispatch(prices, plant, buy_below, sell_above, start_soc=start),
+        plant)
+
+# ---- Part 3. Choose the triggers on 2022 to 2024, freeze them, score every year ----
+# Train the rule like a deployable strategy, not one fitted to the year it is scored on. Its two
+# dollar triggers are chosen on the training years alone (2022 to 2024): take a small grid of buy
+# and sell percentiles of the pooled training prices and convert each to a fixed dollar level.
+TRAIN_YEARS = [2022, 2023, 2024]                                  # 2025 stays unseen until scoring
+train_prices = np.concatenate([prices_by_year[y].to_numpy() for y in TRAIN_YEARS])
+candidates = [(np.percentile(train_prices, low), np.percentile(train_prices, high))
+              for low in (10, 20, 30) for high in (70, 80, 90)]
+
+# Score every candidate on every training year up front, and assert each cyclic solution is a
+# converged, UNIQUE fixed point (a bang-bang rule can in principle settle at more than one
+# self-consistent level). The training objective is then built only from validated results, so an
+# ill-defined candidate cannot silently enter the maximisation.
+candidate_scores = {pair: {y: cyclic_threshold_score(prices_by_year[y].to_numpy(), snowy, *pair)
+                           for y in TRAIN_YEARS} for pair in candidates}
+assert all(r["converged"] and r["unique_fixed_point"]
+           for by_year in candidate_scores.values() for r in by_year.values()), \
+    "a candidate rule's cyclic boundary is not a unique fixed point on some training year"
+# Keep the pair with the highest total profit summed across the three training years.
+buy_trigger, sell_trigger = max(
+    candidates, key=lambda pair: sum(candidate_scores[pair][y]["profit"] for y in TRAIN_YEARS))
+
+# Score the frozen triggers on every year under the same start = end boundary (2025 out of sample),
+# again asserting a converged, unique fixed point so each reported annual profit is well defined.
+s2_scored = {year: cyclic_threshold_score(prices_by_year[year].to_numpy(), snowy,
+                                          buy_trigger, sell_trigger) for year in YEARS}
+assert all(s2_scored[y]["converged"] and s2_scored[y]["unique_fixed_point"] for y in YEARS), \
+    "the frozen rule's cyclic boundary is not a unique fixed point in some year"
+s2_by_year = {year: s2_scored[year]["profit"] for year in YEARS}
+assert all(s2_by_year[y] <= ceiling_by_year[y]["profit"] + 1e-6 for y in YEARS), \
+    "a rule of thumb should never beat perfect foresight"
+held_out_s2 = s2_by_year[2025] / ceiling_by_year[2025]["profit"] * 100
+display(Markdown(
+    f"Frozen on 2022 to 2024, the rule buys at or below **\\${buy_trigger:.0f}/MWh** and sells at "
+    f"or above **\\${sell_trigger:.0f}/MWh**. Applied unchanged to the held-out 2025, it earns "
+    f"**\\${s2_by_year[2025]/1e9:.2f} bn**, or **{held_out_s2:.0f}%** of that year's ceiling. The "
+    f"gap between this mechanical rule and the ceiling is the room in which forecasting and "
+    f"smarter policies operate; Scheme 3 shows how much of it the forecaster captures."
+))
+```
+
+### Scheme 3: The forecaster
+
+No one knows tomorrow's prices. But a trading desk is not guessing blindly either: electricity prices have a strong, stable daily rhythm. The figure below summarises every day of 2024 as a band: the line is the median day, and the shaded bands show where the middle 50% and middle 80% of days fall. The *level* jumps around from day to day, widest in the evening, yet the *shape* barely moves: cheap in the middle of the day, expensive after sunset. That repeating shape, and the odds of moving from one price level to another as the day unfolds, is knowledge an operator genuinely has.
+
+```{python}
+#| code-summary: "Summarise every 2024 day as quantile bands around the median day"
+# Instead of a thin sample of individual days (which hides how the spread itself changes through
+# the day), summarise ALL of 2024's days as quantile bands: at each half-hour slot, the median
+# across every day plus the middle 50% and middle 80% of days. This shows both the stable daily
+# SHAPE and where days most disagree (the evening), the very uncertainty Scheme 3 has to price.
+tod = p.index.hour + p.index.minute / 60                        # time of day, 0.0 .. 23.5
+by_slot = p.groupby(tod)                                        # every day's price at each slot
+x = by_slot.median().index.values
+p10, p25, med, p75, p90 = (by_slot.quantile(q).values for q in (0.10, 0.25, 0.50, 0.75, 0.90))
+
+fig, ax = plt.subplots()
+# Two nested bands of one neutral hue: lighter = middle 80% of days, darker = middle 50%.
+ax.fill_between(x, p10, p90, color=MUTED, alpha=0.20, lw=0, label="Middle 80% of days")
+ax.fill_between(x, p25, p75, color=MUTED, alpha=0.40, lw=0, label="Middle 50% of days")
+ax.plot(x, med, color=INK, lw=2.6, label="Median day")         # the typical daily shape
+ax.set(title="Every Day Has a Similar Shape, Not a Similar Level (2024)",
+       xlabel="Hour of day", ylabel="Price ($/MWh)")
+ax.set_xticks(range(0, 24, 3))
+ax.yaxis.set_major_formatter(dollars)
+ax.set_ylim(min(0.0, p10.min()) - 0.08 * p90.max(), p90.max() * 1.18)   # frame snugly to the bands
+ax.annotate("Days disagree most in the evening\n(the band is widest here)", xy=(19, p90[38]),
+            xytext=(9.5, p90.max() * 0.95), color=INK2, fontsize=9,
+            arrowprops=dict(arrowstyle="->", color=MUTED))
+ax.legend(frameon=False, loc="upper left")
+finish(fig, "08-daily-rhythm.png")
+```
+
+We give the operator exactly the knowledge in that water-value example, learned from real data rather than assumed. The model has three parts.
+
+**What the operator believes.** Prices are grouped into 16 buckets, from "strongly negative" up to "extreme spike". From history we estimate, for every half hour of the day, the odds of moving from each bucket to each other bucket in the next half hour. This is a <abbr title="A model where the odds of what happens next depend only on the current situation, not the full history. Here: the odds of the next half-hour's price bucket, given the current bucket and the time of day.">Markov model</abbr> of the price: it knows the daily rhythm and how sticky prices are, but it never knows what will actually happen.
+
+**What the operator decides.** At every half hour the operator sees the time of day, the current price bucket, and how full the store is, and picks one of three actions: pump at full power, do nothing, or generate at full power (Assumption A13).
+
+**How the best decisions are found.** The plant is a going concern: there is no last day, and the best rule for a Tuesday in March is the best rule for any day with the same price and store level. So we solve for a **stationary** rule: one map from time of day, price bucket and store level to an action, used every day, forever. The method is <abbr title="Solve the last decision first, then step backwards: each earlier decision is easy once you know the value of everything that can follow it.">backward induction</abbr> applied to a single day, repeatedly: sweep backwards through the day's 48 half-hours to value every situation, feed that valuation back in as the value of reaching tomorrow, and sweep again, until the *shape* of the valuation stops changing. (Its *level* keeps growing by one day's average profit each sweep, which is why only the shape can settle; a reference constant is subtracted each sweep to handle this, a standard method called relative value iteration.) Every earlier decision is then a comparison of "cash now" against the expected value of the energy later. The result attaches a dollar value to every stored megawatt-hour in every situation, which hydro traders call the <abbr title="The opportunity-cost value of water held in the reservoir: what a stored megawatt-hour is expected to earn if kept for later instead of sold now.">water value</abbr>. The optimal behaviour follows automatically: **generate when the price is above the water value, pump when it is below the water value minus the round-trip loss, and otherwise wait.**
+
+::: {.callout-note collapse="true"}
+#### The Bellman equation
+
+Let $V_t(s, k)$ be the expected future profit at slot $t$ of the day with store level $s$ and price bucket $k$. Backward induction repeatedly evaluates $$ V_t(s,k) \;=\; \max_{a \,\in\, \{\text{pump},\, \text{idle},\, \text{generate}\}}
+   \Big\{ r(a, s, k) \;+\; \mathbb{E}\big[\, V_{t+1}(s', k') \,\big|\, k \,\big] \Big\}, $$ where $r$ is the immediate cash flow of the action, $s'$ is the store level it leads to, and the expectation runs over the estimated odds of the next price bucket $k'$. The horizon is infinite: the plant has no final day, so the equation is solved to a fixed point rather than swept over a fixed number of days. The one-day update above is applied repeatedly, a reference constant is subtracted after each sweep (relative value iteration), and the iteration stops when the one-sweep change in $V$ is flat across all states to within \$100. The retained rule is then checked directly: solving on past the stopping point no longer moves its scored profit (the convergence evidence under Performance). The implementation is written out in full just below, folded by default.
+:::
+
+#### Specification choices
+
+| Choice | Value | Why this value, and the tradeoff |
+|------------------------|------------------------|------------------------|
+| Price buckets | 16, equal head-count | Enough to separate "negative" from "cheap" from "spike"; more buckets thin out the history each estimate rests on. |
+| Store grid | 61 levels | The value of stored energy is smooth, so a modest grid with interpolation is accurate and fast. |
+| Horizon | Infinite (stationary rule) | The plant has no final day, so the one-day update is repeated to a fixed point: a \$100 span tolerance on the value shape, with the scored profit's stability shown under Performance. |
+| Annual boundary | Repeated-year (cyclic) | Each scored year starts at the store level it ends at, mirroring Scheme 1's cyclic year; the level is found ex post, as disclosed under Performance. |
+| Training years | 2022, 2023, 2024 | The pattern the operator is allowed to learn from (A14). |
+| Test year | 2025, held out | The honest check: a year the model has never seen. (The dispatch rule is held out; the annual boundary normalisation is ex post, as disclosed under Performance.) |
+
+The training years include the 2022 fuel crisis and two calmer years, so the learned pattern is neither all-crisis nor all-calm.
+
+The functions that do this work are the heart of the report's central estimate, so they are written out in full below (folded by default): a small `PriceModel` type that holds the operator's beliefs, then four functions. In order: `fit_price_model` learns those beliefs, `solve_known_distribution` turns them into the stationary decision rule by relative value iteration, `run_policy` scores the rule against **real prices**, and `cyclic_score` applies the repeated-year boundary convention explained under Performance. The third is the honesty guarantee of the whole exercise: the buckets only ever choose the *action*; every dollar is paid and earned at the realised market price.
+
+```{python}
+#| code-summary: "Define the forecaster: the price model, the policy solver, and the scoring functions"
+# ---- Part 1. What the operator believes: the price model and its fitting ----
+@dataclass(frozen=True)
+class PriceModel:
+    '''A time-of-day Markov model of the spot price: what the forecaster believes about
+    tomorrow. Prices are grouped into `n_bins` quantile bins; `transitions[t, i, j]` is the
+    estimated probability that the price moves from bin i at half-hour slot t of the day to
+    bin j at slot t+1. The operator knows this DISTRIBUTION, never the realised path.'''
+    edges: np.ndarray        # (K+1,) bin edges, open at both ends so every price lands somewhere
+    rep_price: np.ndarray    # (K,) representative price of each bin (its training-data mean)
+    transitions: np.ndarray  # (slots, K, K) row-stochastic transition matrices, one per slot
+
+    @property
+    def n_bins(self) -> int:
+        return len(self.rep_price)
+
+    @property
+    def slots(self) -> int:
+        return self.transitions.shape[0]
+
+    def to_bin(self, x: np.ndarray) -> np.ndarray:
+        '''Map prices to bin indices 0..K-1.'''
+        return np.clip(np.digitize(x, self.edges[1:-1]), 0, self.n_bins - 1)
+
+
+def fit_price_model(yearly_series: list, n_bins: int = 16, slots: int = 48) -> PriceModel:
+    '''Fit the time-of-day Markov model to training data. `yearly_series` is a list of price
+    series, one per training year, so no transition is ever counted across a year boundary.
+    Bin edges are quantiles of the pooled data (equal head-count bins); transition counts get
+    add-one (Laplace) smoothing so unseen moves keep a small positive probability.
+
+    Each series may be a pandas Series with a DatetimeIndex (preferred: the half-hour-of-day
+    slot is read off each timestamp, so a missing interval cannot silently shift later
+    observations into the wrong slot) or a plain 1-D array (positional slot numbering,
+    valid only for gap-free data). NaN prices are rejected outright rather than silently
+    binned.'''
+    # Prepare each series: values, each observation's slot of day, and which adjacent pairs
+    # are genuinely consecutive half-hours (a pair straddling a data gap is not a transition).
+    prepared = []
+    for s in yearly_series:
+        if isinstance(s, pd.Series) and isinstance(s.index, pd.DatetimeIndex):
+            values = s.to_numpy(dtype=float)
+            slot = (s.index.hour * 2 + s.index.minute // 30).to_numpy()
+            consecutive = np.diff(s.index.to_numpy()) == np.timedelta64(30, "m")
+        else:
+            values = np.asarray(s, dtype=float)
+            slot = np.arange(len(values)) % slots           # positional fallback: assumes no gaps
+            consecutive = np.ones(max(len(values) - 1, 0), dtype=bool)
+        if np.isnan(values).any():
+            raise ValueError("price series contains NaNs; fill or drop them before fitting")
+        prepared.append((values, slot, consecutive))
+
+    pooled = np.concatenate([values for values, _, _ in prepared])
+    edges = np.quantile(pooled, np.linspace(0, 1, n_bins + 1))
+    edges[0], edges[-1] = -np.inf, np.inf
+    pooled_bins = np.clip(np.digitize(pooled, edges[1:-1]), 0, n_bins - 1)
+    rep_price = np.array([pooled[pooled_bins == k].mean() for k in range(n_bins)])
+
+    counts = np.ones((slots, n_bins, n_bins))               # the Laplace prior
+    for values, slot, consecutive in prepared:
+        b = np.clip(np.digitize(values, edges[1:-1]), 0, n_bins - 1)
+        # tally observed slot-t -> slot-t+1 moves, only across truly consecutive half-hours
+        np.add.at(counts, (slot[:-1][consecutive], b[:-1][consecutive], b[1:][consecutive]), 1)
+    transitions = counts / counts.sum(axis=2, keepdims=True)
+    return PriceModel(edges=edges, rep_price=rep_price, transitions=transitions)
+
+
+# ---- Part 2. Turn beliefs into a decision rule: relative value iteration ----
+def solve_known_distribution(model: PriceModel, plant: StoragePlant, n_soc: int = 61,
+                             span_tol: float = 100.0, max_sweeps: int = 2000,
+                             checkpoint_sweeps: tuple = ()) -> dict:
+    '''The optimal STATIONARY dispatch policy when the operator knows the price distribution
+    (the fitted Markov model) but not the realisation. The plant is a going concern with no
+    final day, so the right formulation is infinite-horizon: the policy that maximises average
+    profit per day, the same rule for every day of every year.
+
+    Solved by relative value iteration on the one-day operator: one sweep is a backward
+    induction through the `slots` half-hours of a day, using the current start-of-day value
+    V as the continuation; after each sweep a reference constant (V at the first grid point)
+    is subtracted so V stays bounded while its SHAPE (the only part that drives decisions)
+    converges. The stopping rule is the span (max minus min) of the change in V across one
+    sweep, in dollars: the span bounds how far the retained policy's average daily profit can
+    sit below the optimum, and it is immune to the constant drift that plain value iteration
+    would show. Returns action[slot, soc_index, price_bin] with 0 = idle, 1 = pump at full
+    power, 2 = generate at full power, plus the convergence record; `checkpoint_sweeps` asks
+    for snapshots of the policy at given sweep counts (for a published convergence table).'''
+    dt, P = plant.interval_hr, plant.power_mw
+    emax, ep, eg, vom = plant.max_stored_energy, plant.eta_pump, plant.eta_gen, plant.var_om_per_mwh
+    K, slots = model.n_bins, model.slots
+    soc_grid = np.linspace(0.0, emax, n_soc)
+    rep = model.rep_price
+
+    # What each action does, per state-of-charge grid point (identical at every slot):
+    pump_mw = np.minimum(P, (emax - soc_grid) / (ep * dt))          # pumping, clipped to the room left
+    gen_mw  = np.minimum(P, soc_grid * eg / dt)                     # generating, clipped to the energy held
+    next_soc = [soc_grid,                                           # idle: the store is unchanged
+                soc_grid + ep * pump_mw * dt,                       # pump: only eta_pump of the buy arrives
+                soc_grid - (gen_mw / eg) * dt]                      # generate: draws 1/eta_gen per unit sold
+    reward = [np.zeros((n_soc, K)),                                 # idle earns nothing
+              -np.outer(pump_mw * dt, rep),                         # pumping buys at the bin price
+              np.outer(gen_mw * dt, rep) - (vom * gen_mw * dt)[:, None]]  # selling, net of variable O&M
+
+    V = np.zeros((n_soc, K))                                        # start-of-day relative value
+    policy = np.zeros((slots, n_soc, K), dtype=np.int8)
+    span_history, checkpoints = [], {}
+    sweep, span = 0, float("inf")                                   # in case max_sweeps is 0
+    for sweep in range(1, max_sweeps + 1):
+        V_prev, W = V, V                                            # W walks backward through the day
+        for t in reversed(range(slots)):
+            # Value of each action = its immediate reward + the expected value of where it
+            # leaves us: interpolate W at the landing state of charge, then average over where
+            # the price bin can go next (the slot-t transition row).
+            action_value = np.empty((3, n_soc, K))
+            for a in range(3):
+                landed = np.empty((n_soc, K))
+                for j in range(K):
+                    landed[:, j] = np.interp(next_soc[a], soc_grid, W[:, j])
+                action_value[a] = reward[a] + landed @ model.transitions[t].T
+            policy[t] = action_value.argmax(axis=0)                 # this sweep's rule for slot t
+            W = action_value.max(axis=0)
+        # Span of the one-sweep change: constant growth (the average daily profit) cancels out,
+        # so the span measures only how much the SHAPE of V is still moving.
+        diff = W - V_prev
+        span = float(diff.max() - diff.min())
+        span_history.append(span)
+        V = W - W[0, 0]                                             # subtract the reference constant
+        if sweep in checkpoint_sweeps:
+            checkpoints[sweep] = policy.copy()
+        if span < span_tol:
+            break
+    return {"policy": policy, "soc_grid": soc_grid, "sweeps": sweep,
+            "span_history": np.array(span_history), "converged": span < span_tol,
+            "checkpoints": checkpoints}
+
+
+# ---- Part 3. Score the rule against real prices, with the start = end boundary ----
+def run_policy(prices: np.ndarray, plant: StoragePlant, policy: np.ndarray,
+               soc_grid: np.ndarray, model: PriceModel, start_soc: float = 0.0) -> dict:
+    '''Score a (slot, soc, bin) policy against a REAL price path. The action is looked up from
+    the policy, but every dollar uses the realised price, never the bin's representative price.
+    `start_soc` is the reservoir's starting potential energy in MWh (default empty); see
+    `cyclic_score` for the repeated-year convention that chooses it.'''
+    dt, P = plant.interval_hr, plant.power_mw
+    emax, ep, eg, vom = plant.max_stored_energy, plant.eta_pump, plant.eta_gen, plant.var_om_per_mwh
+    slots = model.slots
+    prices = np.asarray(prices, dtype=float)
+    bins = model.to_bin(prices)
+    n = len(prices)
+    pump, gen, stored = np.zeros(n), np.zeros(n), np.zeros(n + 1)
+    soc, profit = float(start_soc), 0.0
+    stored[0] = soc
+    for i in range(n):
+        # look up the action for (this half-hour of the day, nearest store level, price bin)
+        action = policy[i % slots, np.abs(soc_grid - soc).argmin(), bins[i]]
+        if action == 1 and soc < emax:                              # pump: buy what fits
+            mw = min(P, (emax - soc) / (ep * dt))                   # full power, or just enough to fill up
+            soc += ep * mw * dt                                     # only eta_pump of the buy arrives
+            profit -= prices[i] * mw * dt                           # pay the REAL price, not the bin price
+            pump[i] = mw
+        elif action == 2 and soc > 0:                               # generate: sell what we hold
+            mw = min(P, soc * eg / dt)                              # full power, or just what is left
+            soc -= (mw / eg) * dt                                   # each MWh sold draws 1/eta_gen from store
+            profit += prices[i] * mw * dt - vom * mw * dt           # earn the REAL price, net of O&M
+            gen[i] = mw
+        stored[i + 1] = soc
+    return {"profit": profit, "pump": pump, "gen": gen, "stored": stored,
+            "generation_twh": gen.sum() * dt / 1e6,
+            "capacity_factor": gen.sum() * dt / (P * n * dt)}
+
+
+def cyclic_score(prices: np.ndarray, plant: StoragePlant, policy: np.ndarray,
+                 soc_grid: np.ndarray, model: PriceModel) -> dict:
+    '''Score a (slot, soc, bin) policy under the repeated-year accounting convention: choose a
+    starting reservoir level whose end-of-year level equals it, so no un-cashed inventory
+    build-up or draw-down distorts the annual profit. This mirrors the cyclic boundary the
+    perfect-foresight LP already uses. The search itself is `find_cyclic_boundary`, defined
+    with Scheme 2, so both trained schemes share exactly the same boundary machinery and its
+    convergence and uniqueness checks.
+
+    One honesty note, mirrored in the report: the fixed point belongs to the policy COMBINED
+    WITH the realised annual price path, not to the policy alone. The whole year is used, ex
+    post, to normalise the boundary, though every individual dispatch decision stays a causal
+    function of the current time, price bucket and store level.'''
+    return find_cyclic_boundary(
+        lambda start: run_policy(prices, plant, policy, soc_grid, model, start_soc=start),
+        plant)
+```
+
+```{python}
+#| code-summary: "Fit the price model on 2022 to 2024 and solve for the stationary rule"
+import time
+
+start = time.time()
+# Fit on the full pandas Series (not bare arrays) so each observation's time-of-day slot comes
+# from its own timestamp; a gap in the data can then never shift observations into wrong slots.
+price_model = fit_price_model([prices_by_year[y] for y in TRAIN_YEARS])
+# Solve for the stationary decision rule by relative value iteration, keeping snapshots of
+# the rule part-way through the solve for the convergence evidence under Performance.
+learned = solve_known_distribution(price_model, snowy, checkpoint_sweeps=(14, 28, 56, 112))
+assert learned["converged"], "the value iteration hit its sweep cap before meeting tolerance"
+elapsed = time.time() - start
+took = f"{elapsed:.1f} seconds" if elapsed >= 1 else "under a second"
+print(f"Fitted the price pattern and solved for the stationary decision rule in {took}: "
+      f"{learned['sweeps']} one-day sweeps to reach the $100 span tolerance.")
+```
+
+#### The estimated decision rule
+
+The whole strategy compresses into one picture. The map below fixes the clock at 6 pm and shows the chosen action at every store level and price bucket: pump (blue) when the price is low, generate (orange) when it is high, and wait (grey) in the band between, where the price gap cannot cover the round-trip loss. The two boundaries are the water value at work, and they slide with the store level exactly as intuition says they should. Nearly empty, stored energy is precious: the rule buys at prices up to about \$110/MWh and refuses to sell below the \$200 price rows. Nearly full, stored energy is cheap to it: the rule only buys below about \$70 and starts selling from about \$110. Nothing here was told to do that; it fell out of the backward induction on its own.
+
+One note for reading the vertical axis: the 16 price buckets each hold the same number of historical half-hours, not the same dollar width, so the top rows span far wider price ranges (the \$164 bucket runs to \$647 and beyond) than the tightly packed everyday rows in the middle. The labels mark each bucket's average price.
+
+```{python}
+#| code-summary: "Map the learned rule at 6 pm: action by price bucket and store level"
+from matplotlib.colors import ListedColormap
+from matplotlib.patches import Patch
+
+slot_6pm = 36                                                     # 6 pm; the map barely changes with the clock
+action_map = learned["policy"][slot_6pm, :, :].T                  # rows = price buckets, cols = store levels
+action_colours = ListedColormap(["#d8d6cf", BUY, SELL])           # 0 idle, 1 pump, 2 generate
+store_gwh = learned["soc_grid"] * snowy.eta_gen / 1e3             # store axis in generatable GWh (Snowy's units)
+step = store_gwh[1] - store_gwh[0]
+store_edges = np.concatenate([[store_gwh[0] - step/2], store_gwh + step/2])   # cell edges for the mesh
+
+fig, ax = plt.subplots(figsize=(9, 4.6))
+ax.pcolormesh(store_edges, np.arange(17), action_map, cmap=action_colours, vmin=-0.5, vmax=2.5)
+label_buckets = [0, 4, 8, 12, 15]                                 # a few representative price levels
+ax.set_yticks([b + 0.5 for b in label_buckets])
+ax.set_yticklabels([f"${price_model.rep_price[b]:,.0f}" for b in label_buckets])
+ax.grid(False)
+ax.set(title="The Learned Rule: Fussier Buyer and Easier Seller as the Store Fills",
+       xlabel="State of charge (GWh)", ylabel="Price level ($/MWh, bucket average)")
+ax.legend(handles=[Patch(color=BUY, label="Pump (buy)"), Patch(color="#d8d6cf", label="Wait"),
+                   Patch(color=SELL, label="Generate (sell)")],
+          frameon=False, loc="upper left", bbox_to_anchor=(0, -0.18), ncol=3)
+finish(fig, "09-learned-rule.png")
+```
+
+One result we did not impose: re-drawing this map for any other hour of the day barely moves it (at most 2% of its cells change). Snowy's reservoir is so deep, roughly 160 hours at full power, that no single day can fill or drain much of it, so the *clock* hardly matters and the *store level* is everything. In effect the learned strategy is a pair of price triggers that adapt to how full the store is. That is also exactly where Scheme 2 leaves money on the table: its two triggers are frozen for the whole year, while this rule slides them with the store level and places them where the water value says they belong.
+
+#### Performance in and out of sample
+
+Now comes the real test. We let the rule trade each of the four years, paying and earning the **actual prices**, not its buckets. Three of those years it trained on; 2025 it has never seen.
+
+Scheme 3 is scored under a **repeated-year accounting convention**, mirroring the cyclic year already imposed on Scheme 1: for each year we choose a starting reservoir level that equals the level the year ends at (within a stated tolerance of 0.1 GWh of dischargeable energy) when the rule trades that year's realised prices. This removes uncompensated inventory build-up from the annual profit comparison; without it, a year that quietly banks a nearly full reservoir gets no credit for the stored value. The convention uses the full year only to normalise the boundary: every dispatch decision within the year remains a causal function of the current time, price bucket and store level.
+
+One disclosure follows. The 2025 **decision rule** is fully held out, trained only on 2022 to 2024, but the **boundary level** is found ex post, from the 2025 path itself: it is a property of the rule combined with the year it trades, not of the rule alone. The diagnostics after the table show what the convention is worth, by also scoring 2025 from an arbitrary empty store.
+
+(Figures in the table are rounded to two decimals, so the gap column can differ slightly from subtracting the rounded columns by hand.)
+
+```{python}
+#| code-summary: "Score the forecaster on all four years under the repeated-year boundary"
+# Score the stationary rule on each year under the repeated-year convention. cyclic_score
+# searches for the start = end reservoir level from five different starting levels, so a
+# non-unique fixed point or a failure to settle cannot pass silently (both are reported).
+scheme3_by_year, comparison_rows = {}, []
+for year in YEARS:
+    year_prices = prices_by_year[year].to_numpy()
+    outcome = cyclic_score(year_prices, snowy, learned["policy"], learned["soc_grid"], price_model)
+    scheme3_by_year[year] = outcome
+    ceiling = ceiling_by_year[year]["profit"]
+    comparison_rows.append({
+        "Year": f"{year}{' (held out)' if year not in TRAIN_YEARS else ''}",
+        "S2 rule of thumb ($bn)": round(s2_by_year[year] / 1e9, 2),
+        "S3 forecaster ($bn)": round(outcome["profit"] / 1e9, 2),
+        "S1 ceiling ($bn)": round(ceiling / 1e9, 2),
+        "S3 share of ceiling": f"{outcome['profit'] / ceiling * 100:.0f}%",
+        "Foresight gap ($bn)": round((ceiling - outcome["profit"]) / 1e9, 2),
+        "Start = end store (GWh)": round(outcome["start_soc"] * snowy.eta_gen / 1e3, 1)})
+comparison = pd.DataFrame(comparison_rows).set_index("Year")
+comparison
+```
+
+```{python}
+#| code-summary: "State the held-out result and the boundary diagnostics"
+held_out = scheme3_by_year[2025]["profit"] / ceiling_by_year[2025]["profit"] * 100
+gap_2025 = (ceiling_by_year[2025]["profit"] - scheme3_by_year[2025]["profit"]) / 1e9
+gap_2022 = (ceiling_by_year[2022]["profit"] - scheme3_by_year[2022]["profit"]) / 1e9
+# Diagnostics for the accounting convention: the same rule scored from an arbitrary empty
+# store (the naive boundary), and the boundary-search record for the held-out year.
+empty_2025 = run_policy(prices_by_year[2025].to_numpy(), snowy,
+                        learned["policy"], learned["soc_grid"], price_model)   # start_soc = 0
+b = scheme3_by_year[2025]
+assert b["converged"], "the 2025 boundary search did not meet its tolerance"
+agreement = ("reaching the same level from all five starting levels tried"
+             if b["unique_fixed_point"] else
+             f"with the five starting levels tried settling within a "
+             f"{b['basin_dis_mwh'] / 1e3:.1f} GWh band whose profits agree to "
+             f"{b['profit_spread'] * 100:.2f}%")
+display(Markdown(
+    f"The headline is the held-out year: trading 2025 with a rule learned entirely from 2022 to "
+    f"2024, the operator captures **{held_out:.0f}% of the perfect-foresight ceiling**. A perfect "
+    f"forecast of every 2025 price would have added only **\\${gap_2025:.2f} bn** (the realised "
+    f"perfect-foresight gap). The exception is 2022: the fuel crisis pushed prices far outside "
+    f"any learned pattern, and the gap blows out to **\\${gap_2022:.2f} bn**. Foresight is worth "
+    f"little in a normal year and a fortune in a crisis, because what it really buys is advance "
+    f"warning of extreme years.\n\n"
+    f"Two diagnostics for the accounting convention. Scored from an arbitrary empty store "
+    f"instead, the 2025 profit is \\${empty_2025['profit'] / 1e9:.2f} bn: the difference is "
+    f"purely the boundary, never the trading. And the 2025 boundary search settled at "
+    f"{b['start_soc'] * snowy.eta_gen / 1e3:.1f} GWh in {b['iterations']} passes with a "
+    f"start-to-end residual of {b['residual_dis_mwh']:.0f} MWh (tolerance 100 MWh), {agreement}."
+))
+```
+
+The same result as one picture: for each year, the grey square is the mechanical rule of thumb, the purple dot is the forecaster, and the open circle is the impossible ceiling. The distance from the purple dot up to the circle is the realised perfect-foresight gap.
+
+```{python}
+#| code-summary: "Plot rule of thumb, forecaster, and ceiling for each year"
+RESULT = "#7b52ab"    # purple, used only here: the forecaster's result. Green stays
+                      # reserved for stored energy, so no colour changes meaning between figures.
+# One dumbbell per year: rule of thumb (grey square) up to the ceiling (open circle), with
+# the forecaster's dot between them; the annotated arrow is the perfect-foresight gap.
+fig, ax = plt.subplots(figsize=(9, 4.8))
+for i, year in enumerate(YEARS):
+    bench_bn   = s2_by_year[year] / 1e9
+    real_bn    = scheme3_by_year[year]["profit"] / 1e9
+    ceiling_bn = ceiling_by_year[year]["profit"] / 1e9
+    ax.plot([i, i], [bench_bn, ceiling_bn], color=GRID, lw=2.5, zorder=1)          # the year's range
+    ax.plot(i, bench_bn,   marker="s", color=MUTED, ms=9,  zorder=2, ls="none")
+    ax.plot(i, ceiling_bn, marker="o", mfc="white", mec=INK, mew=2, ms=11, zorder=2, ls="none")
+    ax.plot(i, real_bn,    marker="o", color=RESULT, ms=12, zorder=3, ls="none")
+    ax.annotate(f"${real_bn:.2f}bn", (i, real_bn), xytext=(14, -4), textcoords="offset points",
+                color=RESULT, fontsize=9.5, fontweight="bold")
+# label the perfect-foresight gap on the year where it is largest (the 2022 crisis)
+gap_top = ceiling_by_year[2022]["profit"] / 1e9
+gap_bottom = scheme3_by_year[2022]["profit"] / 1e9
+ax.annotate("", xy=(0.18, gap_top), xytext=(0.18, gap_bottom),
+            arrowprops=dict(arrowstyle="<->", color=SPIKE, lw=1.6))
+ax.text(0.26, (gap_top + gap_bottom) / 2, "Perfect-foresight gap:\nwhat a perfect forecast\nwould have added",
+        color=SPIKE, fontsize=9, va="center")
+ax.set_xticks(range(len(YEARS)))
+ax.set_xticklabels([f"{y}\n(held out)" if y not in TRAIN_YEARS else str(y) for y in YEARS])
+ax.set(title="Rule of Thumb, Forecaster, and Ceiling by Year", ylabel="Annual arbitrage profit ($bn)")
+ax.yaxis.set_major_formatter(lambda x, _: f"${x:,.1f}")
+ax.legend(handles=[plt.Line2D([], [], marker="s", color=MUTED, ls="none", ms=9, label="S2 rule of thumb (fixed triggers)"),
+                   plt.Line2D([], [], marker="o", color=RESULT, ls="none", ms=11, label="S3 forecaster"),
+                   plt.Line2D([], [], marker="o", mfc="white", mec=INK, mew=2, ls="none", ms=10, label="S1 perfect foresight (ceiling)")],
+          frameon=False, loc="upper left")
+finish(fig, "10-scheme-comparison.png")
+```
+
+::: {.callout-note collapse="true"}
+#### Convergence evidence
+
+Trusting a rule produced by an iterative solve needs two dials to have stopped moving: the solver's internal one (the value shape, which is its stopping rule) and the one that matters to a reader (the scored result). The table shows the held-out 2025 score for snapshots of the rule taken part-way through the solve, and for a fresh solve pushed to twice as many sweeps as the stopping rule asked for. The profit settles to well inside 0.1% by the retained rule, and solving on past the stopping point buys nothing.
+
+```{python}
+#| code-summary: "Score mid-solve snapshots on 2025 to show the answer stopped moving"
+# Convergence of the answer, not just of the solver: score each mid-solve snapshot of the
+# rule on held-out 2025 under the repeated-year convention, then push a fresh solve to twice
+# the sweeps and confirm the retained rule's number no longer moves.
+p25 = prices_by_year[2025].to_numpy()
+snapshots = [*sorted(learned["checkpoints"].items()), (learned["sweeps"], learned["policy"])]
+overrun = solve_known_distribution(price_model, snowy, span_tol=0.0,
+                                   max_sweeps=2 * learned["sweeps"])
+snapshots.append((2 * learned["sweeps"], overrun["policy"]))
+conv_profits = [cyclic_score(p25, snowy, rule, learned["soc_grid"], price_model)["profit"]
+                for _, rule in snapshots]
+# The second half of the dual stopping criterion, asserted: the retained rule (second-last
+# row) and the double-length solve (last row) must agree to better than 0.1%.
+assert abs(conv_profits[-1] - conv_profits[-2]) / conv_profits[-2] < 0.001, \
+    "the scored profit is still moving at the stopping point; raise the sweep budget"
+convergence = pd.DataFrame({
+    "One-day sweeps": [s for s, _ in snapshots],
+    "2025 profit ($bn)": [round(v / 1e9, 3) for v in conv_profits],
+    "Move vs previous row": ["", *(f"{abs(b - a) / a * 100:.2f}%"
+                                   for a, b in zip(conv_profits, conv_profits[1:]))],
+}).set_index("One-day sweeps")
+convergence
+```
+
+:::
+
+### Implied prices and utilisation
+
+Three statistics summarise a whole year of dispatch: the volume-weighted average buy price, the volume-weighted average sell price, and the capacity factor. They compress the backtest into the units any project cash-flow model consumes. The table reports them for the ceiling and for the forecaster, both measured on the held-out year (2025) so neither is flattered by in-sample knowledge; each scheme's implied prices come from its own realised trades, and Scheme 3's column uses the repeated-year boundary disclosed above. The pattern to notice: the plant earns its money on the spread, buying near the bottom of the market and selling at several times its buy price, while running well below full utilisation.
+
+```{python}
+#| code-summary: "Compute 2025's mean buy and sell prices and capacity factor"
+# The three summary statistics for 2025, the held-out test year. Implied prices come from each
+# scheme's own realised trades: total dollars paid or received divided by the energy traded.
+def implied_prices(outcome, year_prices):
+    '''Average realised buy and sell price of a dispatch outcome.'''
+    buy  = (outcome["pump"] * year_prices).sum() / outcome["pump"].sum()
+    sell = (outcome["gen"]  * year_prices).sum() / outcome["gen"].sum()
+    return buy, sell
+
+s3_buy, s3_sell = implied_prices(scheme3_by_year[2025], prices_by_year[2025].to_numpy())
+s3_cf = scheme3_by_year[2025]["capacity_factor"]
+s1 = ceiling_by_year[2025]
+summary_stats = pd.DataFrame({
+    "S1 ceiling (2025)": [f"{s1['mean_buy']:.0f}", f"{s1['mean_sell']:.0f}", f"{s1['capacity_factor']:.0%}"],
+    "S3 forecaster (2025, held out)": [f"{s3_buy:.0f}", f"{s3_sell:.0f}", f"{s3_cf:.0%}"],
+}, index=["Mean buy price ($/MWh)", "Mean sell price ($/MWh)", "Capacity factor"])
+display(summary_stats)
+```
+
+```{python}
+#| code-summary: "Assemble the collapsed note for the group's Excel NPV model"
+# Build the single collapsed hand-off note, folded away by default: how a downstream cash-flow
+# model would consume the three statistics above, and the double-counting trap to avoid.
+from IPython.display import HTML
+s3_normal = [scheme3_by_year[y]["profit"] / 1e9 for y in (2023, 2024, 2025)]   # post-crisis years
+s3_crisis = scheme3_by_year[2022]["profit"] / 1e9                              # the 2022 stress case
+s3_central = np.mean(s3_normal)
+ceiling_max = max(v["profit"] for v in ceiling_by_year.values()) / 1e9
+display(HTML(
+    "<details><summary><strong>Note for the group's Excel NPV model</strong>"
+    "</summary><p>The spreadsheet builds its revenue line from three flat inputs: a buy price of "
+    "$12/MWh, a sell price of $180/MWh, and a capacity factor of 20%. Replace them with the "
+    f"forecaster's held-out column above: mean buy price <strong>${s3_buy:.0f}/MWh</strong>, "
+    f"mean sell price <strong>${s3_sell:.0f}/MWh</strong>, capacity factor "
+    f"<strong>{s3_cf:.0%}</strong>. The spreadsheet's own volume-times-price arithmetic then "
+    "reproduces an annual arbitrage profit near the central estimate of roughly "
+    f"<strong>${s3_central:.1f} bn</strong> (the forecaster averaged over 2023 to 2025). Do "
+    "not also enter that profit as a separate revenue line anywhere: it is the same money the "
+    "three inputs already produce, and entering both would count it twice.</p>"
+    "<p>For the sensitivity tab: across the three normal years the forecaster earned "
+    f"<strong>${min(s3_normal):.2f} to ${max(s3_normal):.2f} bn</strong> a year, and no strategy "
+    f"can beat the ceiling's best year of <strong>${ceiling_max:.1f} bn</strong>. Treat 2022 as a "
+    "stress case rather than part of the forward range: the fuel crisis pushed prices outside any "
+    f"learned pattern, and the forecaster still made <strong>${s3_crisis:.2f} bn</strong>. "
+    "Every figure assumes the plant does not move the price (A1); at 2,200 MW it will, in the "
+    "direction that shrinks these margins, so treat the central case as an optimistic central, "
+    "not a fair one.</p></details>"
+))
+```
+
+## Interpretation
+
+**What we can say.** On four years of real prices, an ideally informed Snowy-sized plant could not have made more than about **\$0.7 to \$1.4 bn a year** in arbitrage profit (the ceiling), and a realistic operator who knows the market's pattern but not its future captures **most of that ceiling in a normal year**, including 84 to 93% in the years after the fuel crisis, with the 2025 rule fully held out of training. The revenue opportunity is real, large, and mostly capturable without foresight.
+
+**What foresight is worth.** The realised perfect-foresight gap between the realistic operator and the ceiling is modest in normal years and explodes in 2022. Perfect forecasting is not where the project's value hides; anticipating rare crises is, and no one can promise that.
+
+**What we cannot say.** Every scheme still over-states revenue, for one dominant reason and several small ones. The dominant one is Assumption A1: Snowy is not a price taker. At 2,200 MW it pushes evening prices down when it sells and afternoon prices up when it buys, shrinking its own margin, most of all in the extreme hours where the profit concentrates (the concentration chart in Scheme 1). The small ones all lean the same way: no outages (A11), no ramp or start-up limits (A8), no network constraints (A12), no drought (A9). A separate limit is the evidence base itself: four years is a short record, and the central scheme's edge assumes the future keeps resembling the 2022 to 2024 prices it learned from. A structural shift, from new storage, fresh transmission, or a changed generation mix, could move that pattern out from under it. A serious price-impact correction is the natural next step of this work.
+
+**Interactive companion.** The page [`snowy-arbitrage-demo.html`](snowy-arbitrage-demo.html) lets the reader vary the two trigger prices of Scheme 2 and watch the profit respond, with the ceiling drawn in for comparison.
+
+## Appendix
+
+### Glossary
+
+| Term | Plain meaning |
+|------------------------------------|------------------------------------|
+| **Arbitrage** | Buy low, sell high. Here: store cheap electricity, sell it when it is expensive. |
+| **Pumped hydro** | A "water battery". Cheap power pumps water uphill; later it runs back down through turbines to make power. |
+| **Spot price** | The market-clearing price for electricity, set every five minutes for each NEM region. |
+| **Dispatch** | The operating schedule: when, and how hard, the plant pumps or generates. |
+| **Round-trip efficiency** | How much comes back out. Snowy returns about **77%** of what it stores; 23% is lost. |
+| **State of charge** | How full the store is right now, in megawatt-hours (MWh). |
+| **Price taker** | A player too small to move the price. Snowy is **not** one. |
+| **Perfect foresight** | Pretending you knew every future price. Impossible in reality; it gives the ceiling. |
+| **MW vs MWh** | **MW** is a rate (how fast); **MWh** is an amount (how much). 2,200 MW for one hour is 2,200 MWh. |
+| **Capacity factor** | Average output as a share of maximum. 20% means it generates, on average, a fifth of flat out. |
+| **Linear program** | An optimisation problem made entirely of straight-line relationships; solvers crack these exactly and fast. |
+| **Markov model** | A model where the odds of what happens next depend only on the current situation, not the full history. |
+| **Backward induction** | Solve the last decision first, then step backwards; each earlier decision becomes easy once the future's value is known. |
+| **Water value** | The opportunity-cost value of energy held in the reservoir: what a stored MWh should earn if kept instead of sold now. |
+| **Perfect-foresight gap** | The dollars a perfect forecast would have added in a given year: the ceiling minus the realistic scheme. The realised, one-path cousin of the textbook EVPI (Expected Value of Perfect Information). |
+| **Stationary rule** | A decision rule with no calendar: the same map from time of day, price and store level to an action, every day. The natural rule for a plant with no final day. |
+| **In sample / out of sample** | Tested on the data a model learned from (flattering) versus on data it never saw (honest). |
+
+### Full assumption audit
+
+The Model states up front only the assumptions that move the answer most; this is the complete list. For each: the reason we make it, the direction it pushes the estimate, and whether we test it.
+
+| \# | Assumption | Why we make it | Effect on the estimate | Tested? |
+|---------------|---------------|---------------|---------------|---------------|
+| **A1** | Snowy is a **price taker** | Standard first pass; keeps every scheme fast and clean | **Over-states** profit, probably a lot | Pending (a price-impact model) |
+| **A2** | **Perfect foresight** of prices (S1 only) | Defines the ceiling we measure everything against | **Over-states** profit | **Yes**: S3 removes it |
+| **A3** | Round trip is **77%**, split evenly across the two legs | We only know the product; profit depends on the product alone | Neutral | Not needed |
+| **A4** | Storage is **350 GWh**, taken at face value | Snowy's headline figure, though the cyclable capacity is disputed | Possibly over-states | **Yes**: shown non-binding in the Analysis |
+| **A5** | **Constant head** (the height the water falls, which sets the turbine power) | Head changes little relative to the deep reservoirs | Roughly neutral | Could add head-dependence later |
+| **A6** | Pump and generate ratings both **2,200 MW** | Reported figures; kept symmetric | Minor | Could split |
+| **A7** | **Continuous** part-load operation | Snowy uses variable-speed units, so it can modulate | Realistic | Not needed |
+| **A8** | **No ramp, minimum-load or start-up limits** | Keeps the ceiling clean | **Over-states** profit | Pending (an operational model) |
+| **A9** | **Closed water battery**: no river inflows or environmental limits | Snowy 2.0 recirculates water; we value only the extra cycling it adds | Slight over-state (drought could cap pumping) | Noted, not modelled |
+| **A10** | The year **repeats** (each scheme starts the year at the level it ends at) | Avoids draining the reservoir for free on 31 December, and stops S2 or S3 banking uncredited inventory | Negligible for S1 (0.01%); about 3% for S3, and comparable for S2, where in each case it replaces an arbitrary empty start | **Yes**: the S3 boundary is reported in the Analysis, and S2 uses the same start = end search |
+| **A11** | **Always available**: no planned or forced outages | The model lets the plant run every half hour | **Over-states** profit | Could apply an availability derate |
+| **A12** | Clears at the **NSW regional price**, with no network limits | Keeps the price signal simple | **Over-states** profit: transmission limits (including HumeLink, the new line being built to carry Snowy's output), loss factors, and times the plant is constrained off | Not modelled |
+| **A13** | S3 acts at **full power or not at all** | The ceiling's optimal plan already sits at the power limits almost everywhere, so part-load adds little | Negligible | Not needed |
+| **A14** | The two trained schemes assume 2025 still resembles **2022 to 2024** (S2's frozen triggers, S3's learned pattern) | Any trained rule must learn from history; the honest check is a year it never saw | Neutral if the pattern holds; a structural shift would erode both | **Yes**: 2025 held out entirely for both |
+
+### Hindsight benchmark for the fixed rule
+
+Scheme 2 freezes its two triggers before 2025. To see how much of its shortfall comes from that frozen pair rather than from the shape of a two-trigger rule, we re-select the triggers with 2025 hindsight over a finer grid built on the 2025 prices themselves, scoring each candidate under the same start = end boundary. This is an ex-post grid-search benchmark over that candidate set, not a formal ceiling over every possible fixed rule.
+
+```{python}
+#| code-summary: "Re-select the triggers with 2025 hindsight and compare with the frozen pair"
+# The best a fixed two-trigger rule could have done WITH hindsight: search a fine grid of dollar
+# triggers built from 2025's OWN price percentiles, plus the frozen deployable pair so the
+# benchmark can never fall below Scheme 2. Every candidate is scored under the same start = end
+# boundary, and every candidate is asserted to settle to a unique cyclic fixed point. This is a
+# benchmark over this candidate set, not a proof-level upper bound over every possible fixed rule.
+def best_fixed_rule(year_prices):
+    buys  = np.percentile(year_prices, np.arange(5, 46, 5))       # candidate buy triggers (cheap end)
+    sells = np.percentile(year_prices, np.arange(55, 96, 5))      # candidate sell triggers (dear end)
+    grid  = [(b, s) for b in buys for s in sells if b < s]
+    grid.append((buy_trigger, sell_trigger))                      # include the frozen pair itself
+    scored = [cyclic_threshold_score(year_prices, snowy, b, s) for b, s in grid]
+    assert all(r["converged"] and r["unique_fixed_point"] for r in scored), \
+        "some hindsight-grid candidate did not settle to a unique cyclic fixed point"
+    return max(r["profit"] for r in scored)
+
+s2_hindsight_2025 = best_fixed_rule(prices_by_year[2025].to_numpy())
+ceiling_2025    = ceiling_by_year[2025]["profit"]
+forecaster_2025 = scheme3_by_year[2025]["profit"]
+depl_gap    = (ceiling_2025 - s2_by_year[2025]) / 1e9             # deployable rule -> ceiling
+retune_gain = (s2_hindsight_2025 - s2_by_year[2025]) / 1e9        # gain from reselecting over the finer grid
+fc_recovers = (forecaster_2025 - s2_hindsight_2025) / 1e9         # what the forecaster adds on top
+resid_gap   = (ceiling_2025 - forecaster_2025) / 1e9             # realised forecaster -> ceiling gap
+display(Markdown(
+    f"Re-selecting the triggers with 2025 hindsight over this finer grid raises the frozen rule's "
+    f"2025 profit from **\\${s2_by_year[2025]/1e9:.2f} bn** to **\\${s2_hindsight_2025/1e9:.2f} bn**, "
+    f"a gain of about **\\${retune_gain:.2f} bn**. Most of its **\\${depl_gap:.2f} bn** gap to the "
+    f"perfect-foresight ceiling therefore remains even after re-selecting the pair on this grid, which suggests the "
+    f"policy *form* matters more than the particular frozen pair. The fitted forecaster adds a "
+    f"further **\\${fc_recovers:.2f} bn**, and the remaining **\\${resid_gap:.2f} bn** is the "
+    f"realised gap between this forecaster and the ceiling."
+))
+```
+
+### Data notes
+
+Prices are the AEMO **dispatch price** for the NSW1 region (the regional reference price), downloaded from AEMO's public NEMWeb archive with the open-source [NEMOSIS](https://github.com/UNSW-CEEM/NEMOSIS) package. Rows flagged as intervention pricing re-runs are dropped (we keep `INTERVENTION = 0`), each 5-minute price is labelled by the start of its interval, and the series is averaged to 30-minute steps. The first run of the loader saves one small snapshot file per year under `python/data/`; those snapshots are committed to the repository, so every later run (and every reader) reproduces identical numbers without touching the network. Delete a snapshot to force a fresh download.
+
+Every figure in this report is also saved as a PNG under `python/figures/` on each run, ready for presentation slides.
+
+### References
+
+- Snowy Hydro, [About Snowy 2.0](https://www.snowyhydro.com.au/snowy-20/about/): capacity, storage, and project description.
+- Wikipedia, [Snowy 2.0 Pumped Storage Power Station](https://en.wikipedia.org/wiki/Snowy_2.0_Pumped_Storage_Power_Station): cost and timeline history with sources.
+- The Conversation (2019), [Snowy 2.0 will not produce nearly as much electricity as claimed](https://theconversation.com/snowy-2-0-will-not-produce-nearly-as-much-electricity-as-claimed-we-must-hit-the-pause-button-125017): the case that cyclable storage is far below 350 GWh.
+- SBS News, ["Bloody hard to build": the Australian mega project at the centre of an energy fight](https://www.sbs.com.au/news/article/snowy-2-0-project-cost-blowout-scrap-debate/gpijiqph2): cost debate and responses to the storage critique.
+- AEMO NEMWeb public data archive, accessed through [NEMOSIS](https://github.com/UNSW-CEEM/NEMOSIS) (UNSW Collaboration on Energy and Environmental Markets).

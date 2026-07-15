@@ -1,0 +1,10 @@
+# Local environments and caches — never committed
+.venv/
+.nemosis_cache/
+__pycache__/
+.DS_Store
+
+# Quarto intermediate files
+*.quarto_ipynb
+*.quarto_ipynb_*
+/.quarto/
