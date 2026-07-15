@@ -8,14 +8,21 @@ rule of thumb whose two trigger prices are frozen on the training years, and a f
 who knows the market's statistical pattern but never the future, scored on a held-out year.
 The report is written for non-technical readers; all code is folded away by default.
 
+**Read the report:**
+[yobin-tim.github.io/snowy-arbitrage](https://yobin-tim.github.io/snowy-arbitrage/python/snowy-arbitrage.html)
+
 ## How to use it
 
 ### Read it (no install)
 
-Open `snowy-arbitrage.html` in any browser. It is fully self-contained: every figure,
-number, and folded code block is baked in. There is also a small interactive companion,
-`snowy-arbitrage-demo.html`, where you can drag the two trigger prices of the
-rule-of-thumb scheme and watch the profit respond.
+The rendered report is served at
+[yobin-tim.github.io/snowy-arbitrage/python/snowy-arbitrage.html](https://yobin-tim.github.io/snowy-arbitrage/python/snowy-arbitrage.html);
+every figure, number, and folded code block is baked in. Its small interactive companion
+lives at
+[yobin-tim.github.io/snowy-arbitrage/python/snowy-arbitrage-demo.html](https://yobin-tim.github.io/snowy-arbitrage/python/snowy-arbitrage-demo.html),
+where you can drag the two trigger prices of the rule-of-thumb scheme and watch the
+profit respond. (Both pages are the files `snowy-arbitrage.html` and
+`snowy-arbitrage-demo.html` in this repository, served as-is.)
 
 ### Run it in the cloud (no install, live code)
 
@@ -25,7 +32,6 @@ price snapshots from the repository, so the cloud run reproduces the same number
 rather than pulling live data from AEMO. Everything else the report needs is defined in
 the notebook itself, so there is nothing more to fetch. No account setup beyond a Google
 login.
-
 
 ### Run it locally (full control)
 
