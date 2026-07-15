@@ -26,10 +26,11 @@ profit respond. (Both pages are the files `snowy-arbitrage.html` and
 
 ### Run it in the cloud (no install, live code)
 
-Click the **Open in Colab** badge at the top of the report or the notebook. The first
-cell installs the pinned packages from `requirements.txt` and fetches the four committed
-price snapshots from the repository, so the cloud run reproduces the same numbers offline
-rather than pulling live data from AEMO. Everything else the report needs is defined in
+Click the **Open in Colab** badge at the top of the report or the notebook, then
+"Run all". The first cell installs the few packages Colab lacks (at the versions pinned
+in `requirements.txt`, leaving Colab's preinstalled scientific stack untouched) and
+fetches the four committed price snapshots from the repository, so the cloud run
+reproduces the same numbers offline rather than pulling live data from AEMO. Everything else the report needs is defined in
 the notebook itself, so there is nothing more to fetch. No account setup beyond a Google
 login.
 

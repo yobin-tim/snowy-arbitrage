@@ -95,9 +95,12 @@ def _fetch(relpath: str, dest: Path):
     dest.parent.mkdir(parents=True, exist_ok=True)
     urllib.request.urlretrieve(f"{RAW}/{relpath}", str(dest))
 
-# 1. Packages. If anything the report needs is missing (typically only on a fresh cloud machine),
-#    install the EXACT pinned set from requirements.txt so a cloud run reproduces the same numbers.
-#    Fetch requirements.txt first if it is not already alongside the notebook.
+# 1. Packages. On a fresh cloud machine (for example Colab) a few packages are missing; install
+#    ONLY those, at the pinned versions from requirements.txt. We deliberately leave the machine's
+#    preinstalled scientific stack (numpy, pandas, scipy, matplotlib) untouched: the running kernel
+#    has already loaded those libraries, and replacing them on disk mid-session leaves the kernel
+#    half old and half new until a restart. The result checks through the report verify that the
+#    numbers come out the same either way.
 _missing = [p for p in ("cvxpy", "highspy", "pyarrow", "nemosis") if importlib.util.find_spec(p) is None]
 if _missing:
     _req = Path("requirements.txt")
@@ -105,8 +108,14 @@ if _missing:
         try:
             _fetch("requirements.txt", _req)          # pull the pinned list onto a bare cloud machine
         except Exception:
-            _req = None                               # no list available; fall back to a loose install
-    _install = ["-r", str(_req)] if _req and _req.exists() else [*_missing, "pandas", "numpy", "matplotlib"]
+            pass                                      # no list available; fall back to unpinned names
+    _pins = {}                                        # package name -> its "name==version" pin
+    if _req.exists():
+        for _line in _req.read_text().splitlines():
+            _spec = _line.split("#")[0].strip()       # drop comments and whitespace
+            if "==" in _spec:
+                _pins[_spec.split("==")[0].strip()] = _spec
+    _install = [_pins.get(p, p) for p in _missing]    # pin each missing package where known
     subprocess.run([sys.executable, "-m", "pip", "install", "-q", *_install])
 
 from dataclasses import dataclass, replace
