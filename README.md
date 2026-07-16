@@ -8,21 +8,17 @@ rule of thumb whose two trigger prices are frozen on the training years, and a f
 who knows the market's statistical pattern but never the future, scored on a held-out year.
 The report is written for non-technical readers; all code is folded away by default.
 
-**Read the report:**
-[yobin-tim.github.io/snowy-arbitrage](https://yobin-tim.github.io/snowy-arbitrage/python/snowy-arbitrage.html)
-
 ## How to use it
 
 ### Read it (no install)
 
-The rendered report is served at
-[yobin-tim.github.io/snowy-arbitrage/python/snowy-arbitrage.html](https://yobin-tim.github.io/snowy-arbitrage/python/snowy-arbitrage.html);
-every figure, number, and folded code block is baked in. Its small interactive companion
-lives at
-[yobin-tim.github.io/snowy-arbitrage/python/snowy-arbitrage-demo.html](https://yobin-tim.github.io/snowy-arbitrage/python/snowy-arbitrage-demo.html),
+Open `snowy-arbitrage.html` in any browser, or send collaborators the served copy at
+[yobin-tim.github.io/snowy-arbitrage/python/snowy-arbitrage.html](https://yobin-tim.github.io/snowy-arbitrage/python/snowy-arbitrage.html)
+(GitHub Pages on the public mirror; it updates when the mirror is pushed). The file is
+fully self-contained: every figure, number, and folded code block is baked in. There is
+also a small interactive companion, `snowy-arbitrage-demo.html`, served at the same place,
 where you can drag the two trigger prices of the rule-of-thumb scheme and watch the
-profit respond. (Both pages are the files `snowy-arbitrage.html` and
-`snowy-arbitrage-demo.html` in this repository, served as-is.)
+profit respond.
 
 ### Run it in the cloud (no install, live code)
 
@@ -33,6 +29,10 @@ fetches the four committed price snapshots from the repository, so the cloud run
 reproduces the same numbers offline rather than pulling live data from AEMO. Everything else the report needs is defined in
 the notebook itself, so there is nothing more to fetch. No account setup beyond a Google
 login.
+
+The published home for collaborators is
+[github.com/yobin-tim/snowy-arbitrage](https://github.com/yobin-tim/snowy-arbitrage),
+a public one-way mirror of this folder (see step 7 of the maintainer workflow).
 
 ### Run it locally (full control)
 
@@ -110,13 +110,17 @@ escapes apostrophes as `&#39;`, so search for numbers, not phrases containing qu
 Figures in `figures/` regenerate on execution; confirm their timestamps moved.
 
 **6. Commit** only the files that changed together: the `.qmd`, the derived notebook, the
-rendered HTML, and regenerated figures. Data snapshots only change when a year is
-re-downloaded on purpose.
+rendered HTML, regenerated figures, and the refreshed `results/` store. Data snapshots only
+change when a year is re-downloaded on purpose.
 
-**7. A note on where edits land.** This repository is a one-way mirror of the
-maintainer's private working folder: changes land there first and are pushed here with
-each render. Pull requests and direct edits here are welcome; the maintainer folds them
-back into the working folder, re-renders, and pushes the result forward.
+**7. Mirror to the public repository.** The collaborator-facing home is
+[github.com/yobin-tim/snowy-arbitrage](https://github.com/yobin-tim/snowy-arbitrage): a
+public repository holding only this project (this README at its root, the report files,
+data snapshots, and figures under `python/`, plus `binder/requirements.txt`). The mirror
+is one-way and manual: after committing here, copy the changed files into a clone of the
+mirror and push. Nothing else from this private workspace ever goes into it. If a
+collaborator edits the mirror directly (pull request or direct commit), fold that change
+back into this folder first, then re-render and push the mirror forward.
 
 ## Collaborating on the report
 

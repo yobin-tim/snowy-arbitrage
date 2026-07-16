@@ -27,10 +27,12 @@ prices = pd.concat(
 ).reset_index()
 
 # The model outputs: every scheme's half-hourly dispatch, the annual summary,
+# the financial-modelling inputs (volume-weighted prices with P10/P50/P90 spreads),
 # and the frozen parameters. See the report's appendix (Results store) for how
 # these are produced and checked.
 dispatch   = pd.read_parquet(RESULTS / "dispatch.parquet")
 summary    = pd.read_csv(RESULTS / "summary.csv")
+fin_inputs = pd.read_csv(RESULTS / "fin_inputs.csv")
 parameters = pd.read_csv(RESULTS / "parameters.csv")
 
 print(f"{len(prices):,} price rows | {len(dispatch):,} dispatch rows | "

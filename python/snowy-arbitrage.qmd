@@ -28,7 +28,7 @@ jupyter: snowy-arbitrage
 ::: callout-tip
 ## Summary
 
-In this report, we backtest energy arbitrage for a plant with Snowy 2.0's published specifications against four years of real half-hourly NSW spot prices (2022 to 2025). We consider three dispatch schemes that provide bounds on the profitability of the strategy. Firstly, we consider a perfect-foresight case where the plant **knows** the future prices and can dispatch optimally. Secondly, we consider a **rule of thumb** where the plant dispatches on two fixed price triggers that say when to charge and discharge. Finally, we consider a **forecaster** which dispatches on a statistical model of prices, trained on the first three years and tested on the fourth. Our results show that knowing the distribution of prices is almost as good as knowing the actual prices, capturing **84 to 93%** of the perfect-foresight profits. Note however that this analysis assumes that the plant is a price-taker, and does not account for the fact that a plant of this size will move prices against itself. Hence, the profit estimates should be read as optimistic rather than fair.
+In this report, we backtest energy arbitrage for a plant with Snowy 2.0's published specifications against four years of real half-hourly NSW spot prices (2022 to 2025). We consider three dispatch schemes that provide bounds on the profitability of the strategy. Firstly, we consider a perfect-foresight case where the plant **knows** the future prices and can dispatch optimally. Secondly, we consider a **rule of thumb** where the plant dispatches on two fixed price triggers that say when to charge and discharge. Finally, we consider a **forecaster** which dispatches on a statistical model of prices, trained on the first three years and tested on the fourth. Our results show that knowing the distribution of prices is almost as good as knowing the actual prices, capturing **84 to 93%** of the perfect-foresight profits. Note however that this analysis assumes that the plant is a price-taker, and does not account for the fact that a plant of this size will move prices against itself. Hence, the profit estimates should be read as optimistic rather than fair. A financial appendix then prices the backtest as a project: at the official \$12 billion capital cost the venture returns about **4.85% real after tax**, so the discount rate, not the operating strategy, decides whether it pays.
 :::
 
 ## Introduction
@@ -45,7 +45,7 @@ Each case answers the same question with a different amount of knowledge.
 
 **The perfect foresight** operator is the theoretical best case: for each year it knows the exact sequence of prices and can time every half-hour against it, even holding charge for a spike it sees coming. So, this scheme bounds the maximum arbitrage profit that year could have allowed.
 
-**The rule of thumb** operator knows only price *levels*, not their timing: it pumps whenever the price is among the cheapest hours of the year and generates whenever it is among the dearest. We allow this operator to use the data from the first three years to set its two price triggers, but it never sees the actual 2025 prices. This scheme is a simple, mechanical benchmark: it needs no forecasting at all, and it sets the floor any smarter operator should beat.
+**The rule of thumb** operator knows only price *levels*, not their timing: it pumps whenever the price is among the cheapest hours of the year and generates whenever it is among the most expensive. We allow this operator to use the data from the first three years to set its two price triggers, but it never sees the actual 2025 prices. This scheme is a simple, mechanical benchmark: it needs no forecasting at all, and it sets the floor any smarter operator should beat.
 
 **The forecaster** is probably the most realistic operator. It learns the typical time-of-day *shape* of prices from 2022 to 2024, commits to a single standing policy, and is then judged on the untouched 2025; that out-of-sample result is the report's headline.
 
@@ -169,6 +169,18 @@ def dollars(x, _=None):
     '''Format an axis tick as a whole-dollar label: 1500 -> $1,500.'''
     return f"${x:,.0f}"
 
+def clock(h):
+    '''Format an hour-of-day number as clock time: 0 -> 12am, 15 -> 3pm, 24 -> 12am.'''
+    h = int(round(h)) % 24
+    return "12am" if h == 0 else "12pm" if h == 12 else (f"{h}am" if h < 12 else f"{h-12}pm")
+
+def clock_axis(ax, last=24, step=3):
+    '''Label an hour-of-day x axis in clock time, midnight to midnight.'''
+    ticks = list(range(0, last + 1, step))
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([clock(t) for t in ticks])
+    ax.set_xlim(0, last)
+
 def finish(fig, name):
     '''Save the figure into the presentation pack (python/figures/), then show it here.'''
     fig.savefig(FIG_DIR / name, dpi=200, bbox_inches="tight", facecolor=SURFACE)
@@ -207,36 +219,37 @@ def ensure_year_prices(year: int) -> pd.Series:
 
 YEARS = [2022, 2023, 2024, 2025]
 prices_by_year = {year: ensure_year_prices(year) for year in YEARS}
-price_2024 = prices_by_year[2024]                             # the year we use for close-up plots
+CLOSE_YEAR = 2025                                             # close-up year: the latest, and later the held-out test year
+price_close = prices_by_year[CLOSE_YEAR]
 print(f"Loaded {', '.join(map(str, YEARS))}: "
       f"{sum(len(s) for s in prices_by_year.values()):,} half-hourly prices in total.")
 ```
 
 ```{python}
-#| code-summary: "Summarise 2024's prices in one live sentence"
-p = price_2024                       # short alias for the close-up year, reused by the figure cells below
+#| code-summary: "Summarise the close-up year's prices in one live sentence"
+p = price_close                      # short alias for the close-up year, reused by the figure cells below
 share_negative = (p < 0).mean() * 100
 display(Markdown(
-    f"In 2024, the NSW spot price averaged **\\${p.mean():,.0f}/MWh**, ranged from "
+    f"In {CLOSE_YEAR}, the NSW spot price averaged **\\${p.mean():,.0f}/MWh**, ranged from "
     f"**\\${p.min():,.0f}** to **\\${p.max():,.0f}/MWh**, and was "
     f"**below zero {share_negative:.0f}%** of the time."
 ))
 ```
 
-Before we set up the dispatch model, we look at the raw prices in three ways: the average daily cycle, the distribution of prices within a year, and whether the opportunity persists from year to year. The close-ups use 2024, the most recent training year; the final figure compares all four years.
+Before we set up the dispatch model, we look at the raw prices in three ways: the average daily cycle, the distribution of prices within a year, and whether the opportunity persists from year to year. The close-ups use 2025, the most recent year of data and, later in the report, the held-out test year; the final figure compares all four years.
 
 #### Daily price cycle
 
-The average 2024 day makes the cycle visible: a small peak in the morning, followed by prices sagging through the middle of the day and climbing into the evening. The shaded blocks mark the cheapest and dearest four-hour windows, which are when a storage plant likely buys and sells respectively.
+The average 2025 day makes the cycle visible: a small peak in the morning, followed by prices sagging through the middle of the day and climbing into the evening. The shaded blocks mark the cheapest and most expensive four-hour windows, which is roughly where a storage plant would buy and sell.
 
 ```{python}
-#| code-summary: "Plot the average day and shade the cheapest and dearest blocks"
-# Step 1. The average day: the mean 2024 price at each of the 48 half-hour slots of the day.
+#| code-summary: "Plot the average day and shade the cheapest and most expensive blocks"
+# Step 1. The average day: the close-up year's mean price at each of the 48 half-hour slots of the day.
 average_by_time = p.groupby(p.index.hour + p.index.minute/60).mean()
 
 # Step 2. Find the two four-hour windows to shade. We use CONTIGUOUS blocks (8 half-hours) so
 # the shading reads as one window each: the cheapest consecutive block anywhere in the day, and
-# the dearest consecutive block after 2 pm (the evening peak, where a storage plant sells).
+# the most expensive consecutive block after 2 pm (the evening peak, where a storage plant sells).
 window = 8
 running = np.convolve(average_by_time.values, np.ones(window), "valid")   # sum of each 8-slot block
 cheap_start = running.argmin()
@@ -250,12 +263,12 @@ fig, ax = plt.subplots()
 ax.plot(average_by_time.index, average_by_time.values, color=INK, lw=2.2)
 ax.fill_between(average_by_time.index, average_by_time.values,
                 where=average_by_time.index.isin(cheapest_hours),
-                color=BUY, alpha=0.25, label="Cheapest hours (buy)")
+                color=BUY, alpha=0.25, label="Cheapest 4 hours")
 ax.fill_between(average_by_time.index, average_by_time.values,
                 where=average_by_time.index.isin(evening_peak),
-                color=SELL, alpha=0.30, label="Most expensive hours (sell)")
+                color=SELL, alpha=0.30, label="Most expensive 4 hours")
 trough_centre = cheapest_hours[window // 2]            # point the arrow into the shaded trough
-ax.annotate("Solar floods midday",
+ax.annotate("Renewables flood midday",
             xy=(trough_centre, average_by_time.loc[trough_centre]),
             xytext=(7.5, average_by_time.max()*0.45),
             color=BUY, fontsize=9, arrowprops=dict(arrowstyle="->", color=BUY))
@@ -263,8 +276,8 @@ ax.annotate("Evening peak",
             xy=(average_by_time.idxmax(), average_by_time.max()),   # the true daily peak
             xytext=(11.5, average_by_time.max()*0.9),
             color=SELL, fontsize=9, arrowprops=dict(arrowstyle="->", color=SELL))
-ax.set(title="Average NSW Price Through the Day (2024)", xlabel="Hour of day", ylabel="Price ($/MWh)")
-ax.set_xticks(range(0, 24, 3))
+ax.set(title=f"Average Daily Price, NSW ({CLOSE_YEAR})", xlabel="Time of day", ylabel="Price ($/MWh)")
+clock_axis(ax)
 ax.yaxis.set_major_formatter(dollars)
 ax.legend(frameon=False)
 finish(fig, "01-average-day.png")
@@ -272,72 +285,102 @@ finish(fig, "01-average-day.png")
 
 #### Price distribution
 
-We sort every half hour of the year from most to least expensive and plot the same curve twice below. 
+We sort every half hour of the year from cheapest to most expensive and plot the same curve twice below. Sorted this way, the curve is the year's cumulative price distribution: pick any share of the year on the horizontal axis and the curve gives the price below which that share of the year traded. (Formally it is the <abbr title="Cumulative distribution function: for each price, the share of observations at or below it. Here the axes are swapped, with price on the vertical, so the extreme prices stay readable.">CDF</abbr> drawn with its axes swapped, which keeps the extreme prices readable.)
 
-The top panel shows the full range of prices in 2024. A handful of extreme hours dominate the view. 
-
-The bottom panel redraws the same curve with the axis clipped at \$400/MWh. The spikes now run off the top of the chart, and the shape of the ordinary year becomes visible: a gentle slope through the modest band where almost the whole year sits, dipping below zero at the far right. 
+The top panel shows the full range of prices in 2025; a handful of extreme half-hours at the far right dominate the view. The bottom panel redraws the same curve with the axis clipped at \$400/MWh, and the shape of the ordinary year becomes visible: prices below zero for the first 13% of the year, half the year below \$79/MWh, and a gentle climb through the modest band where almost the whole year sits.
 
 As such, prices are modest for most of the year and extreme only occasionally; the Analysis section shows how much of the profit rides on those few extreme hours.
 
 ```{python}
-#| code-summary: "Sort 2024's half-hours by price and plot the full range plus the everyday band"
-# Step 1. Sort the year: every half hour of 2024, most expensive first.
-sorted_prices = np.sort(p.values)[::-1]
-hour_rank = np.arange(len(sorted_prices)) * 0.5         # position in the year, in hours
+#| code-summary: "Sort the close-up year's half-hours by price and plot the cumulative distribution"
+# Step 1. Sort the year cheapest-first. Against the share of the year on the x axis, the sorted
+# curve IS the cumulative price distribution (the CDF with its axes swapped): at x% of the year,
+# the curve's height is the price below which x% of the half-hours traded.
+sorted_prices = np.sort(p.values)
+share_of_year = np.arange(1, len(sorted_prices) + 1) / len(sorted_prices) * 100
 top_1pct = int(0.01 * len(sorted_prices))               # how many half-hours make up the top 1%
-year_hours = len(sorted_prices) * 0.5                   # true length of the year in hours (leap-safe)
+neg_share = (sorted_prices < 0).mean() * 100            # where the curve crosses zero
+median_price = float(np.median(sorted_prices))
 
 # Step 2. Draw the same curve twice; the panels differ only in the range of the price axis.
 fig, (full, zoom) = plt.subplots(2, 1, figsize=(9, 5.8), height_ratios=[1, 1.25])
 
-# Top panel: the full range. The top 1% is shaded and the single dearest half hour marked,
-# because at this scale the extremes are the only feature the eye can read.
-full.plot(hour_rank, sorted_prices, color=INK, lw=2.2)
-full.fill_between(hour_rank[:top_1pct], sorted_prices[:top_1pct], color=SPIKE, alpha=0.35)
-full.plot(hour_rank[0], sorted_prices[0], marker="o", color=SPIKE, ms=7)
-full.annotate(f"The dearest half-hour reaches\n${sorted_prices[0]:,.0f}/MWh (the market price cap);\nthe shaded band is the top 1% of hours",
-              xy=(hour_rank[0], sorted_prices[0]), xytext=(1400, sorted_prices[0]*0.55),
+# Top panel: the full range. The top 1% is shaded and the single most expensive half hour
+# marked, because at this scale the extremes are the only feature the eye can read.
+full.plot(share_of_year, sorted_prices, color=INK, lw=2.2)
+full.fill_between(share_of_year[-top_1pct:], sorted_prices[-top_1pct:], color=SPIKE, alpha=0.35)
+full.plot(share_of_year[-1], sorted_prices[-1], marker="o", color=SPIKE, ms=7)
+full.annotate(f"The most expensive half-hour\nreaches ${sorted_prices[-1]:,.0f}/MWh;\nthe shaded band is the top 1%",
+              xy=(share_of_year[-1], sorted_prices[-1]), xytext=(58, sorted_prices[-1]*0.5),
               color=SPIKE, fontsize=9, arrowprops=dict(arrowstyle="->", color=SPIKE))
-full.set(title="Every Half-Hour of 2024, Sorted From Most to Least Expensive", ylabel="Price ($/MWh)")
+full.set(title=f"The {CLOSE_YEAR} Prices as a Cumulative Distribution", ylabel="Price ($/MWh)")
 full.yaxis.set_major_formatter(dollars)
 
 # Bottom panel: the same curve with the axis clipped to the everyday band, so its shape shows.
-# The spikes run off the top on purpose.
-zoom.plot(hour_rank, sorted_prices, color=INK, lw=2.2)
+# The spikes run off the top on purpose; the two dotted markers are the zero crossing and the
+# median, each labelled with its cumulative reading.
+zoom.plot(share_of_year, sorted_prices, color=INK, lw=2.2)
 zoom.axhline(0, color=MUTED, lw=1, ls=":")              # the zero-price line
-zoom.set(ylim=(-100, 400), xlabel=f"Hours of the year (of {year_hours:,.0f})", ylabel="Price ($/MWh)")
+below = sorted_prices < 0
+zoom.fill_between(share_of_year[below], sorted_prices[below], 0, color=BUY, alpha=0.30)
+zoom.annotate(f"{neg_share:.1f}% of the year\nis priced below zero", xy=(neg_share, 0),
+              xytext=(neg_share + 6, -72), color=BUY, fontsize=9,
+              arrowprops=dict(arrowstyle="->", color=BUY))
+zoom.plot([50, 50], [-100, median_price], color=MUTED, lw=1, ls=":")
+zoom.plot(50, median_price, marker="o", color=INK, ms=5)
+zoom.annotate(f"half the year is below ${median_price:,.0f}/MWh", xy=(50, median_price),
+              xytext=(52, 190), color=INK2, fontsize=9, arrowprops=dict(arrowstyle="->", color=MUTED))
+zoom.set(ylim=(-100, 400), xlabel="Share of the year (%)", ylabel="Price ($/MWh)")
 zoom.yaxis.set_major_formatter(dollars)
-zoom.text(4300, 300, "Almost the whole year sits in this modest band", color=INK2, fontsize=9.5, ha="center")
-zoom.text(7900, -70, "prices below zero", color=BUY, fontsize=8.5, ha="center")
+zoom.text(30, 320, "Almost the whole year sits in this modest band", color=INK2, fontsize=9.5, ha="center")
 finish(fig, "02-sorted-half-hours.png")
 ```
 
 #### The opportunity, year by year
 
-The following graphs show that there is a market opportunity for storage arbitrage. 
+The following graphs show that there is a market opportunity for storage arbitrage.
 
-The left panel shows the median daily gap between the day's highest and lowest price: **\$210 to \$245/MWh** in each of the four years, which is several times what the round-trip loss costs on a typical cycle. 
+The left panel shows the spread of **daily price ranges** (each day's high minus its low), not just the median: the median day's range is **\$210 to \$245/MWh** in every year, and even the 10th-percentile day clears **\$80 to \$130/MWh**, several times what the round-trip loss costs on a typical cycle. In other words, cycling pays on almost every day of the year, not only on the rare spectacular ones.
 
 The right panel shows the share of half-hours priced below zero, which more than quadruples across the window as solar capacity grows. So the opportunity is structural and increasing over the four years that we have considered in this report.
 
 ```{python}
-#| code-summary: "Compute and plot each year's daily spread and share of negative prices"
-# Two summary numbers per year: the median daily high-low gap (the size of the everyday
-# opportunity) and the share of half-hours priced below zero (the cheapening buy side).
-daily_spread, negative_share = [], []
+#| code-summary: "Compute and plot each year's daily-gap spread and share of negative prices"
+# Two summaries per year: the DISTRIBUTION of daily price ranges (the size of the everyday
+# opportunity, shown as a median with two bands rather than a single bar), and the share of
+# half-hours priced below zero (the cheapening buy side), labelled with its value.
+spread_q, negative_share = {}, []
 for year in YEARS:
     series = prices_by_year[year]
     by_day = series.groupby(series.index.date)
-    daily_spread.append((by_day.max() - by_day.min()).median())   # the typical day's high-low gap
+    gaps = by_day.max() - by_day.min()                            # one range (high minus low) per day
+    spread_q[year] = gaps.quantile([0.10, 0.25, 0.50, 0.75, 0.90])
     negative_share.append((series < 0).mean() * 100)              # how often the plant is paid to charge
 
 fig, (spread_ax, negative_ax) = plt.subplots(1, 2, figsize=(9, 3.9))
-spread_ax.bar([str(y) for y in YEARS], daily_spread, color=MUTED, edgecolor=INK, linewidth=1.2)
-spread_ax.set(title="Typical Daily Price Spread", ylabel="Median daily high minus low ($/MWh)")
+for i, year in enumerate(YEARS):
+    q = spread_q[year]
+    spread_ax.plot([i, i], [q[0.10], q[0.90]], color=MUTED, lw=7, alpha=0.35,
+                   solid_capstyle="butt", zorder=1)               # middle 80% of days
+    spread_ax.plot([i, i], [q[0.25], q[0.75]], color=MUTED, lw=7, alpha=0.8,
+                   solid_capstyle="butt", zorder=2)               # middle 50% of days
+    spread_ax.plot(i, q[0.50], marker="_", color=INK, ms=15, mew=3, zorder=3)
+    spread_ax.annotate(f"${q[0.50]:,.0f}", (i, q[0.50]), xytext=(10, -3),
+                       textcoords="offset points", fontsize=8.5, color=INK)
+spread_ax.set_xticks(range(len(YEARS)))
+spread_ax.set_xticklabels([str(y) for y in YEARS])
+spread_ax.set_xlim(-0.6, len(YEARS) - 0.4)
+spread_ax.set(title="Daily Price Range", ylabel="Range ($/MWh)")
 spread_ax.yaxis.set_major_formatter(dollars)
+spread_ax.legend(handles=[plt.Line2D([], [], color=MUTED, lw=7, alpha=0.35, label="Middle 80% of days"),
+                          plt.Line2D([], [], color=MUTED, lw=7, alpha=0.8, label="Middle 50% of days"),
+                          plt.Line2D([], [], marker="_", color=INK, ls="none", ms=12, mew=3, label="Median day")],
+                 frameon=False, loc="upper left", fontsize=8.5)
 negative_ax.bar([str(y) for y in YEARS], negative_share, color=BUY, alpha=0.85, edgecolor=INK, linewidth=1.2)
-negative_ax.set(title="Half-Hours Priced Below Zero", ylabel="Share of the year (%)")
+for i, share in enumerate(negative_share):                        # the actual percentage on each bar
+    negative_ax.text(i, share + 0.3, f"{share:.1f}%", ha="center", fontsize=9.5, color=INK)
+negative_ax.set(title="Prices Below Zero", ylabel="Share of the year (%)",
+                ylim=(0, max(negative_share) * 1.18))
 finish(fig, "03-opportunity-by-year.png")
 ```
 
@@ -347,17 +390,17 @@ What they do not show is how a plant converts that opportunity into profit, or w
 
 ## Storage Arbitrage: An Illustration
 
-Before setting out the model, we walk through the trade itself on one real day. The section fixes the two ideas everything later rests on: the mechanics, where buying cheap half-hours fills the store and selling dear ones drains it, with the store's level tying each decision to the ones around it; and the economics, where a price gap becomes profit only once it clears the round-trip loss.
+Before setting out the model, we walk through the trade itself on one real day. The section fixes the two ideas everything later rests on: the mechanics, where buying cheap half-hours fills the store and selling expensive ones drains it, with the store's level tying each decision to the ones around it; and the economics, where a price gap becomes profit only once it clears the round-trip loss.
 
-### One day's trade (10 July 2024)
+### One day's trade (24 July 2025)
 
-We take one real winter day and rank its 48 half-hours by price: the plant buys during the ten cheapest (blue) and sells during the ten dearest (orange). The ranking uses the whole day at once, so it is hindsight rather than one of the three schemes; it is the trade itself at its simplest, the thing every scheme in the Analysis is trying to find. The dearest half-hours cluster in the morning and evening peaks, with the cheapest in the solar-flooded middle of the day. The lower panel tracks the <abbr title="How full the store is right now, in megawatt-hours.">state of charge</abbr> this produces: the store starts the day partly charged, sells through a brief midnight spike and the morning peak, refills across the cheap midday hours, and drains again into the evening peak, ending the day exactly as charged as it began (the same start-equals-end convention the dispatch model later imposes on each year).
+We take one real winter day and rank its 48 half-hours by price: the plant buys during the ten cheapest (blue) and sells during the ten most expensive (orange). The ranking uses the whole day at once, so it is hindsight rather than one of the three schemes; it is the trade itself at its simplest, the thing every scheme in the Analysis is trying to find. On this day the ten most expensive half-hours all sit in the evening peak, and the ten cheapest in the solar-flooded middle of the day, where the price actually goes negative: the plant is briefly *paid* to charge. (The smaller morning peak goes unsold; the evening beats it.) The lower panel tracks the <abbr title="How full the store is right now, in megawatt-hours.">state of charge</abbr> this produces: the store starts the day empty, fills across the cheap midday hours, and drains through the evening peak, ending the day exactly as charged as it began (the same start-equals-end convention the dispatch model later imposes on each year).
 
 ```{python}
-#| code-summary: "Sketch one real day's trade: rank the half-hours, buy the 10 cheapest, sell the 10 dearest"
+#| code-summary: "Sketch one real day's trade: rank the half-hours, buy the 10 cheapest, sell the 10 most expensive"
 # Step 1. Pick the day and rank its 48 half-hours by price, using the whole day at once.
 # That is hindsight, not one of the three schemes: the point is to show the trade itself.
-one_day = p.loc["2024-07-10"]
+one_day = p.loc["2025-07-24"]
 window = 10                                        # trade 10 half-hours on each side
 cheap_slots = one_day.nsmallest(window).index      # when the plant buys (store fills)
 pricey_slots = one_day.nlargest(window).index      # when the plant sells (store drains)
@@ -371,28 +414,33 @@ for t in one_day.index:
     boundary_level.append(boundary_level[-1] + (1 if t in cheap_slots else -1 if t in pricey_slots else 0))
 boundary_level = np.array(boundary_level) - min(boundary_level)
 
-# Step 3. Draw. Each half hour has one settled price, so the price is drawn as a step, and
-# the shaded buy/sell columns cover exactly their own half hours; the store line below then
-# rises and falls precisely under those columns.
+# Step 3. Draw. Each half hour has one settled price, so the price is drawn as a step. The
+# buy/sell columns are shaded over the FULL panel height (not just up to the price line), so
+# a traded half-hour reads as a column even where the price is negative; the store line below
+# then rises and falls exactly across those columns (the level is plotted at each half-hour
+# boundary, so a buy interval's ramp spans that interval, not the one after it).
 hour_of_day = one_day.index.hour + one_day.index.minute/60
 edge_hours = np.append(hour_of_day, 24.0)          # the 49 half-hour boundaries of the day
 fig, (price_ax, store_ax) = plt.subplots(2, 1, sharex=True, figsize=(9, 5.2), height_ratios=[2, 1])
-price_ax.plot(hour_of_day, one_day.values, color=INK, lw=2.2, drawstyle="steps-post")
-price_ax.fill_between(hour_of_day, one_day.values, where=one_day.index.isin(cheap_slots),
-                      step="post", color=BUY, alpha=0.30, label="Buy (cheap)")
-price_ax.fill_between(hour_of_day, one_day.values, where=one_day.index.isin(pricey_slots),
-                      step="post", color=SELL, alpha=0.35, label="Sell (expensive)")
-price_ax.set(title="One Winter Day: Buy Low, Sell High (Illustrative Sketch)", ylabel="Price ($/MWh)")
+price_ax.plot(hour_of_day, one_day.values, color=INK, lw=2.2, drawstyle="steps-post", zorder=3)
+price_ax.fill_between(hour_of_day, 0, 1, where=one_day.index.isin(cheap_slots), step="post",
+                      transform=price_ax.get_xaxis_transform(), color=BUY, alpha=0.22,
+                      label="Buy (cheap)")
+price_ax.fill_between(hour_of_day, 0, 1, where=one_day.index.isin(pricey_slots), step="post",
+                      transform=price_ax.get_xaxis_transform(), color=SELL, alpha=0.25,
+                      label="Sell (expensive)")
+price_ax.set(title="Illustration: Arbitrage Action (24 July 2025)", ylabel="Price ($/MWh)")
 price_ax.yaxis.set_major_formatter(dollars)
 price_ax.legend(frameon=False, ncol=1, loc="upper left")
 store_ax.fill_between(edge_hours, boundary_level, color=STORE, alpha=0.5)
 store_ax.plot(edge_hours, boundary_level, color=STORE, lw=2.2)
-store_ax.set(xlabel="Hour of day", ylabel="State of charge\n(illustrative)")
+store_ax.set(xlabel="Time of day", ylabel="State of charge")
 store_ax.set_yticks([])
-store_ax.set_xticks(range(0, 24, 3))
-# stamp the sketch so the PNG can never pass as model output on a slide
-store_ax.text(0.99, 0.88, "sketch of the idea, not model output", transform=store_ax.transAxes,
-              ha="right", va="top", color=INK2, fontsize=8.5, style="italic")
+clock_axis(store_ax)
+# the caveats travel with the PNG, as a note under the figure rather than inside the plot
+fig.text(0.005, -0.01, "Sketch of the idea, not model output. Buys and sells are simply placed in "
+         "the day's ten cheapest and ten most expensive\nhalf-hours; this shows the mechanics, "
+         "not an optimised schedule.", ha="left", va="top", fontsize=8.5, color=INK2, style="italic")
 finish(fig, "04-one-day-trade.png")
 ```
 
@@ -402,8 +450,8 @@ We sort the day's prices from cheap to expensive. We buy across the cheap block 
 
 ```{python}
 #| code-summary: "Sort the day's prices and mark the price gap between the buy and sell blocks"
-# Step 1. Sort the day from cheapest to dearest half hour; the traded blocks sit at the two
-# ends, and the gap between their average price levels is the raw spread, BEFORE losses.
+# Step 1. Sort the day from cheapest to most expensive half hour; the traded blocks sit at the
+# two ends, and the gap between their average price levels is the raw spread, BEFORE losses.
 day_sorted = np.sort(one_day.values)
 buy_price, sell_price = day_sorted[:window].mean(), day_sorted[-window:].mean()
 
@@ -412,16 +460,20 @@ fig, ax = plt.subplots()
 ax.plot(range(len(day_sorted)), day_sorted, color=INK, lw=2.2)
 ax.fill_between(range(window), day_sorted[:window], color=BUY, alpha=0.30, label="Buy (cheapest hours)")
 ax.fill_between(range(len(day_sorted)-window, len(day_sorted)), day_sorted[-window:],
-                color=SELL, alpha=0.35, label="Sell (priciest hours)")
+                color=SELL, alpha=0.35, label="Sell (most expensive hours)")
 ax.annotate("", xy=(len(day_sorted)-window/2, sell_price), xytext=(len(day_sorted)-window/2, buy_price),
             arrowprops=dict(arrowstyle="<->", color=SPIKE, lw=2))
 ax.text(len(day_sorted)-window, (buy_price+sell_price)/2,
         f"  Price gap\n  ~${sell_price-buy_price:,.0f}/MWh",
         color=SPIKE, fontsize=10, va="center")
-ax.set(title="The Same Day, Prices Sorted From Cheap to Expensive",
-       xlabel="Half-hours of the day, sorted", ylabel="Price ($/MWh)")
+ax.set(title="Illustration: The Same Day, Sorted (24 July 2025)",
+       xlabel="Half-hours of the day, sorted by price", ylabel="Price ($/MWh)")
 ax.yaxis.set_major_formatter(dollars)
 ax.legend(frameon=False, loc="upper left")
+# same caveat as the previous figure, travelling with the PNG
+fig.text(0.005, -0.01, "Sketch of the idea, not model output; the shaded blocks are the same ten "
+         "cheapest and ten most expensive half-hours as above.",
+         ha="left", va="top", fontsize=8.5, color=INK2, style="italic")
 finish(fig, "05-gap-vs-losses.png")
 ```
 
@@ -591,15 +643,15 @@ def solve_perfect_foresight(prices: np.ndarray, plant: StoragePlant, cyclic: boo
             "mean_sell": (g * prices).sum() / g.sum() if g.sum() > 0 else float("nan"),
             "mean_buy":  (u * prices).sum() / u.sum() if u.sum() > 0 else float("nan")}
 
-check = solve_perfect_foresight(price_2024.to_numpy(), snowy)
-print("2024 solver status:", check["status"])   # expect 'optimal'
+check = solve_perfect_foresight(price_close.to_numpy(), snowy)
+print(f"{CLOSE_YEAR} solver status:", check["status"])   # expect 'optimal'
 ```
 
 #### The ceiling, 2022 to 2025
 
 Rather than trust one year, we run the model on four. We report the answer as a **band** rather than a single number, because a large slice of the top of it depends on a few extreme-price hours that Snowy itself would erase.
 
-Two reading notes for the table. **Ceiling** and **Ex-spikes** are the pair to compare: the difference between them is how much of the ceiling rides on a handful of extreme hours. The last three columns (the <abbr title="Average output as a share of maximum. 20% means the plant generates, on average, a fifth of flat out.">capacity factor</abbr> and the average buy and sell prices) return at the end of the report as the backtest's summary statistics.
+Two reading notes for the table. **Perfect foresight** and **Ex-spikes** are the pair to compare: the difference between them is how much of the ceiling rides on a handful of extreme hours. The last three columns (the <abbr title="Average output as a share of maximum. 20% means the plant generates, on average, a fifth of flat out.">capacity factor</abbr> and the average buy and sell prices) return at the end of the report as the backtest's summary statistics.
 
 ```{python}
 #| code-summary: "Solve all four years, with and without the extreme top 1% of prices"
@@ -616,7 +668,7 @@ for year in YEARS:
         assert float(np.minimum(r["pump"], r["gen"]).max()) < 1e-6, \
             f"{year}: the LP pumped and generated simultaneously; review the ceiling"
     ceiling_by_year[year] = full                                   # kept for the scheme comparison later
-    rows.append({"Year": year, "Ceiling ($bn)": full["profit"]/1e9, "Ex-spikes ($bn)": trimmed["profit"]/1e9,
+    rows.append({"Year": year, "Perfect foresight ($bn)": full["profit"]/1e9, "Ex-spikes ($bn)": trimmed["profit"]/1e9,
                  "Capacity factor": full["capacity_factor"], "Mean buy ($/MWh)": full["mean_buy"],
                  "Mean sell ($/MWh)": full["mean_sell"]})
 panel = pd.DataFrame(rows).set_index("Year")
@@ -625,7 +677,7 @@ panel.round(2)
 
 ```{python}
 #| code-summary: "State the ceiling band in one live sentence"
-low, high = panel["Ceiling ($bn)"].min(), panel["Ceiling ($bn)"].max()
+low, high = panel["Perfect foresight ($bn)"].min(), panel["Perfect foresight ($bn)"].max()
 trim_low, trim_high = panel["Ex-spikes ($bn)"].min(), panel["Ex-spikes ($bn)"].max()
 display(Markdown(
     f"**The ceiling: \\${low:.1f} bn to \\${high:.1f} bn of arbitrage profit per year** including "
@@ -637,90 +689,107 @@ display(Markdown(
 
 #### Profit concentration
 
-Sort 2024's half-hours from most to least profitable and add them up. The curve shows the share of the whole year's profit earned by the best few hours. It rises almost vertically: a tiny sliver of the year earns most of the money, and those are exactly the extreme-price hours where the price-taker assumption breaks down worst. (The chart shows the first 1,500 hours; the curve keeps climbing gently to 100% across the full year.)
+Sort 2025's half-hours from most to least profitable and add them up; the curve below carries that running total across the whole year, as a share of the year's final profit. It tells the story in three phases. First a near-vertical climb: the best ~330 hours (about 4% of the year) earn half the profit, and those are exactly the extreme-price hours where the price-taker assumption breaks down worst. The climb continues until every money-making hour has been counted, at about **126%** of the final profit. The curve then runs flat across the hours the plant sat idle, and finally *descends* back to 100%: the give-back on the right is the pumping bill, the cheap hours in which the plant pays to charge. Selling high only nets the year's profit after buying cheap has been paid for.
 
 ```{python}
-#| code-summary: "Rank 2024's half-hours by profit and plot the cumulative share"
-# Rank 2024's half-hours by the profit each contributed, then accumulate: the curve's height
-# at x is the share of the whole year's profit earned by its x most profitable hours.
-result_2024 = ceiling_by_year[2024]
-profit_sorted = np.sort(result_2024["net_dollars"])[::-1]
+#| code-summary: "Rank the close-up year's half-hours by profit and plot the cumulative share"
+# Rank the close-up year's half-hours by the profit each contributed, then accumulate: the
+# curve's height at x is the share of the year's final profit earned by its x most profitable
+# hours. Generating hours push it up, idle hours leave it flat, and pumping hours (which cost
+# money) pull it back down to exactly 100% at the year's end.
+result_close = ceiling_by_year[CLOSE_YEAR]
+profit_sorted = np.sort(result_close["net_dollars"])[::-1]
 total_year_hours = len(profit_sorted) * 0.5                     # leap-safe length of the year in hours
 cumulative_share = np.cumsum(profit_sorted) / profit_sorted.sum() * 100
 hours_ranked = np.arange(1, len(profit_sorted)+1) * 0.5
 hours_for_half = hours_ranked[np.searchsorted(cumulative_share, 50)]   # hours that earn half the profit
+peak_ix = cumulative_share.argmax()                             # the last hour that still adds money
 
 fig, ax = plt.subplots()
 ax.plot(hours_ranked, cumulative_share, color=INK, lw=2.5)                       # bold black data line
+ax.axhline(100, color=MUTED, lw=1, ls=":")                      # where the year must end
 ax.axhline(50, color=MUTED, lw=1, ls=":")
 ax.axvline(hours_for_half, color=SPIKE, lw=1, ls=":")
 ax.fill_between(hours_ranked, cumulative_share, where=(hours_ranked <= hours_for_half), color=SPIKE, alpha=0.2)
 ax.annotate(f"The best ~{hours_for_half:,.0f} hours\n(~{hours_for_half/total_year_hours*100:.0f}% of the year)\nearn half the profit",
-            xy=(hours_for_half, 50), xytext=(360, 24), color=SPIKE, fontsize=10,
+            xy=(hours_for_half, 50), xytext=(hours_for_half + 380, 22), color=SPIKE, fontsize=10,
             arrowprops=dict(arrowstyle="->", color=SPIKE))
-ax.set(title="A Few Hours Earn Most of the Money (2024)", xlabel="Most profitable hours of the year",
-       ylabel="Share of the year's profit (%)", xlim=(0, 1500), ylim=(0, 101))
+ax.annotate(f"every money-making hour counted: {cumulative_share[peak_ix]:.0f}%",
+            xy=(hours_ranked[peak_ix], cumulative_share[peak_ix]), xytext=(2500, 135),
+            color=INK2, fontsize=9, arrowprops=dict(arrowstyle="->", color=MUTED))
+ax.annotate("the descent is the pumping bill:\nhours the plant pays to charge",
+            xy=(7900, float(cumulative_share[int(7900 / 0.5) - 1])), xytext=(5300, 60),
+            color=BUY, fontsize=9, arrowprops=dict(arrowstyle="->", color=BUY))
+ax.set(title=f"Profit Distribution, Perfect Foresight ({CLOSE_YEAR})",
+       ylabel="Cumulative share of the year's profit (%)",
+       xlim=(0, total_year_hours), ylim=(0, 142))
+# the x label as one line with reading arrows at each end, in place of a plain set_xlabel
+ax.text(0.5, -0.13, "Hours of the year, ranked by profit", transform=ax.transAxes, ha="center", color=INK)
+ax.text(0, -0.13, "← most profitable", transform=ax.transAxes, ha="left", fontsize=9, color=INK2)
+ax.text(1, -0.13, "least profitable →", transform=ax.transAxes, ha="right", fontsize=9, color=INK2)
 finish(fig, "06-profit-concentration.png")
 ```
 
 #### Sensitivity to storage capacity
 
-Snowy's headline 350 GWh is contested: the cyclable capacity may be far smaller (see Background and Data). Re-running 2024 with much smaller stores barely changes the result, because the value is in **daily** cycling, not in holding energy for weeks. The headline figure can therefore be taken at face value without the answer leaning on it.
+Snowy's headline 350 GWh is contested: the cyclable capacity may be far smaller (see Background and Data). Re-running 2025 with much smaller stores barely changes the result, because the value is in **daily** cycling, not in holding energy for weeks. The headline figure can therefore be taken at face value without the answer leaning on it.
 
 ```{python}
-#| code-summary: "Re-solve 2024 with a 50, 175, and 350 GWh store"
-# Re-solve the 2024 ceiling with progressively smaller reservoirs and report each result as a
-# share of the 350 GWh answer: if the share stays high, the contested size does not matter.
-full_ceiling = ceiling_by_year[2024]["profit"]
+#| code-summary: "Re-solve the close-up year with a 50, 175, and 350 GWh store"
+# Re-solve the close-up year's ceiling with progressively smaller reservoirs and report each
+# as a share of the 350 GWh answer: if the share stays high, the contested size does not matter.
+full_ceiling = ceiling_by_year[CLOSE_YEAR]["profit"]
 storage_rows = []
 for gwh in (50, 175, 350):
-    smaller = solve_perfect_foresight(price_2024.to_numpy(), replace(snowy, dischargeable_mwh=gwh*1000))
-    storage_rows.append({"Storage (GWh)": gwh, "Ceiling ($bn)": round(smaller["profit"]/1e9, 2),
+    smaller = solve_perfect_foresight(price_close.to_numpy(), replace(snowy, dischargeable_mwh=gwh*1000))
+    storage_rows.append({"Storage (GWh)": gwh, "Perfect foresight ($bn)": round(smaller["profit"]/1e9, 2),
                          "Share of 350 GWh result": f"{round(smaller['profit']/full_ceiling*100)}%"})
 pd.DataFrame(storage_rows).set_index("Storage (GWh)")
 ```
 
 #### The optimal schedule over one week
 
-Over one real week, the model fills the store (green line) when prices dip and empties it into the peaks. Blue is pumping (buying), orange is generating (selling).
+Over one real week, everything the optimal plan does sits in one panel: the price (black line, left axis), the store level (green line, right axis), and the plant's actions as shaded columns (blue while pumping, orange while generating). The model fills the store when prices dip and empties it into the peaks, and the green line ties each action to the next: every climb happens inside blue columns, every drain inside orange ones.
 
 ```{python}
-#| code-summary: "Plot one week of the optimal plan: price, dispatch, and state of charge"
-# One winter week of the optimal plan: the price on top; below it, pumping (down, blue) and
-# generating (up, orange) with the reservoir level drawn over them as a green line.
-week = slice("2024-07-08", "2024-07-14")
-week_index = price_2024.loc[week].index
-pos = price_2024.index.get_indexer(week_index)
-store_gwh = result_2024["stored"][pos] * snowy.eta_gen / 1e3        # show the store in generatable GWh (Snowy's units)
+#| code-summary: "Plot one week of the optimal plan: price, actions, and state of charge in one panel"
+# One winter week of the optimal plan, merged into a single panel: price on the left axis, the
+# reservoir level on the right, and the actions as light full-height columns (blue = pumping,
+# orange = generating) so the timing reads directly against the price line.
+week = slice("2025-06-30", "2025-07-06")
+week_index = price_close.loc[week].index
+pos = price_close.index.get_indexer(week_index)
+store_gwh = result_close["stored"][pos] * snowy.eta_gen / 1e3       # show the store in generatable GWh (Snowy's units)
 
-fig, (price_ax, dispatch_ax) = plt.subplots(2, 1, sharex=True, figsize=(9, 5.4), height_ratios=[2, 1])
-price_ax.plot(week_index, price_2024.loc[week].values, color=INK, lw=1.6)         # title + ylabel already say "Price"
-price_ax.set(title="One Week of the Optimal Plan (8-14 July 2024)", ylabel="Price ($/MWh)")
+fig, price_ax = plt.subplots(figsize=(9, 4.8))
+price_ax.fill_between(week_index, 0, 1, where=result_close["pump"][pos] > 0, step="mid",
+                      transform=price_ax.get_xaxis_transform(), color=BUY, alpha=0.15)
+price_ax.fill_between(week_index, 0, 1, where=result_close["gen"][pos] > 0, step="mid",
+                      transform=price_ax.get_xaxis_transform(), color=SELL, alpha=0.15)
+price_ax.plot(week_index, price_close.loc[week].values, color=INK, lw=1.6, zorder=3)
+price_ax.set(title="Optimal Strategy, Perfect Foresight (30 June to 6 July 2025)", ylabel="Price ($/MWh)")
 price_ax.yaxis.set_major_formatter(dollars)
-# lighter dispatch fills so the state-of-charge line reads on top of them
-dispatch_ax.fill_between(week_index, 0, -result_2024["pump"][pos], color=BUY,  step="mid", alpha=0.5, label="Pump (buy)")
-dispatch_ax.fill_between(week_index, 0,  result_2024["gen"][pos],  color=SELL, step="mid", alpha=0.5, label="Generate (sell)")
-dispatch_ax.axhline(0, color=MUTED, lw=0.8)
-dispatch_ax.set(ylabel="Power (MW)")
-store_ax = dispatch_ax.twinx()                                                    # state of charge as a bold green line
-store_ax.plot(week_index, store_gwh, color=STORE, lw=2.2)
-store_ax.fill_between(week_index, 0, store_gwh, color=STORE, alpha=0.12)
+store_ax = price_ax.twinx()                                         # state of charge as a bold green line
+store_ax.plot(week_index, store_gwh, color=STORE, lw=2.4)
 store_ax.set_ylabel("State of charge (GWh)", color=STORE)
+store_ax.set_ylim(bottom=0)
 store_ax.tick_params(axis="y", colors=STORE)
 store_ax.spines["right"].set_color(STORE)
-# in-figure legend, because this PNG travels to slides without its caption
+# in-figure legend, because this PNG travels to slides without its caption; placed under
+# the plot so it cannot collide with the title
 from matplotlib.patches import Patch
-dispatch_ax.legend(handles=[Patch(color=BUY, alpha=0.5, label="Pump (buy)"),
-                            Patch(color=SELL, alpha=0.5, label="Generate (sell)"),
-                            plt.Line2D([], [], color=STORE, lw=2.2, label="State of charge")],
-                   frameon=False, loc="upper left", ncol=3, fontsize=8.5, bbox_to_anchor=(0, 1.22))
+price_ax.legend(handles=[plt.Line2D([], [], color=INK, lw=1.6, label="Price"),
+                         plt.Line2D([], [], color=STORE, lw=2.4, label="State of charge"),
+                         Patch(color=BUY, alpha=0.3, label="Pumping"),
+                         Patch(color=SELL, alpha=0.3, label="Generating")],
+                frameon=False, loc="upper center", ncol=4, fontsize=8.5, bbox_to_anchor=(0.5, -0.22))
 fig.autofmt_xdate()
 finish(fig, "07-optimal-week.png")
 ```
 
 ### Scheme 2: The rule of thumb
 
-The opposite extreme is an operator with two fixed trigger prices and no discretion. Buy at full power whenever the price sits at or below the cheaper trigger, sell whenever it sits at or above the dearer one, do nothing in between. The triggers are set the way a real operator would have to set them: chosen once on the training years (2022 to 2024), frozen, and then applied unchanged. So this is not a rule tuned with hindsight to the year it trades; it commits to its prices in advance and is judged out of sample on the held-out 2025, exactly as the forecaster is. It reacts only to the current price against its two fixed levels: it never learns the time-of-day pattern and never forecasts the coming sequence. Its role is to show what plain mechanical trading at sensible price levels would have earned, so the forecaster that follows has an honest, deployable baseline to beat.
+The opposite extreme is an operator with two fixed trigger prices and no discretion. Buy at full power whenever the price sits at or below the cheaper trigger, sell whenever it sits at or above the more expensive one, do nothing in between. The triggers are set the way a real operator would have to set them: chosen once on the training years (2022 to 2024), frozen, and then applied unchanged. So this is not a rule tuned with hindsight to the year it trades; it commits to its prices in advance and is judged out of sample on the held-out 2025, exactly as the forecaster is. It reacts only to the current price against its two fixed levels: it never learns the time-of-day pattern and never forecasts the coming sequence. Its role is to show what plain mechanical trading at sensible price levels would have earned, so the forecaster that follows has an honest, deployable baseline to beat.
 
 ```{python}
 #| code-summary: "Build, train, and score the rule of thumb (triggers frozen on 2022 to 2024)"
@@ -844,39 +913,77 @@ display(Markdown(
 
 ### Scheme 3: The forecaster
 
-No one knows tomorrow's prices. But a trading desk is not guessing blindly either: electricity prices have a strong, stable daily rhythm. The figure below summarises every day of 2024 as a band: the line is the median day, and the shaded bands show where the middle 50% and middle 80% of days fall. The *level* jumps around from day to day, widest in the evening, yet the *shape* barely moves: cheap in the middle of the day, expensive after sunset. That repeating shape, and the odds of moving from one price level to another as the day unfolds, is knowledge an operator genuinely has.
+No one knows tomorrow's prices. But a trading desk is not guessing blindly either: electricity prices have a strong, stable daily rhythm. The figure below draws the operator's raw material: every one of the 1,096 days the forecaster is allowed to learn from (2022 to 2024), each as one faint line, with the median training day in bold. Individual days are wild, and some blow straight through the top of the chart, yet the *shape* barely moves: cheap in the middle of the day, expensive after sunset. The bold line is what a disciplined price expectation looks like: not a guess about any particular tomorrow, but the pattern three years of days keep returning to. That repeating shape, and the odds of moving from one price level to another as the day unfolds, is knowledge an operator genuinely has.
 
 ```{python}
-#| code-summary: "Summarise every 2024 day as quantile bands around the median day"
-# Instead of a thin sample of individual days (which hides how the spread itself changes through
-# the day), summarise ALL of 2024's days as quantile bands: at each half-hour slot, the median
-# across every day plus the middle 50% and middle 80% of days. This shows both the stable daily
-# SHAPE and where days most disagree (the evening), the very uncertainty Scheme 3 has to price.
-tod = p.index.hour + p.index.minute / 60                        # time of day, 0.0 .. 23.5
-by_slot = p.groupby(tod)                                        # every day's price at each slot
-x = by_slot.median().index.values
-p10, p25, med, p75, p90 = (by_slot.quantile(q).values for q in (0.10, 0.25, 0.50, 0.75, 0.90))
+#| code-summary: "Draw every training day as one faint line, with the median day in bold"
+# The forecaster's raw material: all training days (2022 to 2024) as faint lines, one per
+# day, with the median across days at each half-hour slot drawn in bold. The y axis is
+# deliberately clipped: spike days genuinely run off the top of this chart (the worst reaches
+# about $15,500/MWh), which is the point: levels are wild, the shape is stable.
+train_days = pd.concat([prices_by_year[y] for y in TRAIN_YEARS])
+day_matrix = (pd.DataFrame({"date": train_days.index.date,
+                            "tod": train_days.index.hour + train_days.index.minute / 60,
+                            "price": train_days.to_numpy()})
+              .pivot(index="date", columns="tod", values="price"))
+x = day_matrix.columns.to_numpy()
+median_day = day_matrix.median(axis=0).to_numpy()             # the pattern the operator distils
 
 fig, ax = plt.subplots()
-# Two nested bands of one neutral hue: lighter = middle 80% of days, darker = middle 50%.
-ax.fill_between(x, p10, p90, color=MUTED, alpha=0.20, lw=0, label="Middle 80% of days")
-ax.fill_between(x, p25, p75, color=MUTED, alpha=0.40, lw=0, label="Middle 50% of days")
-ax.plot(x, med, color=INK, lw=2.6, label="Median day")         # the typical daily shape
-ax.set(title="Every Day Has a Similar Shape, Not a Similar Level (2024)",
-       xlabel="Hour of day", ylabel="Price ($/MWh)")
-ax.set_xticks(range(0, 24, 3))
+ax.plot(x, day_matrix.T.to_numpy(), color=MUTED, alpha=0.06, lw=0.7)
+ax.plot(x, median_day, color=INK, lw=2.8)
+ymax = 800.0
+spike_days = int((day_matrix.max(axis=1) > ymax).sum())       # days whose peak exceeds the frame
+ax.set_ylim(-130, ymax)
+ax.set(title="Daily Prices (2022 to 2024)", xlabel="Time of day", ylabel="Price ($/MWh)")
+clock_axis(ax)
 ax.yaxis.set_major_formatter(dollars)
-ax.set_ylim(min(0.0, p10.min()) - 0.08 * p90.max(), p90.max() * 1.18)   # frame snugly to the bands
-ax.annotate("Days disagree most in the evening\n(the band is widest here)", xy=(19, p90[38]),
-            xytext=(9.5, p90.max() * 0.95), color=INK2, fontsize=9,
-            arrowprops=dict(arrowstyle="->", color=MUTED))
-ax.legend(frameon=False, loc="upper left")
+ax.annotate(f"{spike_days} spike days run off the top of this chart", (0.3, ymax * 0.94),
+            color=INK2, fontsize=9)
+ax.legend(handles=[plt.Line2D([], [], color=INK, lw=2.8, label="Median price")],
+          frameon=False, loc="upper left", bbox_to_anchor=(0.01, 0.90))
 finish(fig, "08-daily-rhythm.png")
 ```
 
-We give the operator exactly the knowledge in that water-value example, learned from real data rather than assumed. The model has three parts.
+Summarised into bands, the same 1,096 days become the expectation the forecaster disciplines itself with. The wild individual days of the previous figure smooth into a stable daily shape: half of all days stay inside the narrow inner band, eight in ten inside the outer one, and the bands themselves tell the operator when the cheap and expensive parts of a typical day arrive.
+
+```{python}
+#| code-summary: "Summarise the same training days into quantile bands around the median"
+# The same day-by-slot matrix as above, summarised: at each half-hour of the day, the median
+# across the 1,096 training days with the middle 50% and middle 80% of days as bands. This is
+# the smoothed view of the spaghetti above: the day-shape the forecaster's beliefs encode.
+q10, q25, q75, q90 = (day_matrix.quantile(q, axis=0).to_numpy() for q in (0.10, 0.25, 0.75, 0.90))
+
+fig, ax = plt.subplots()
+ax.fill_between(x, q10, q90, color=MUTED, alpha=0.25, label="Middle 80% of days")
+ax.fill_between(x, q25, q75, color=MUTED, alpha=0.5, label="Middle 50% of days")
+ax.plot(x, median_day, color=INK, lw=2.8, label="Median price")
+ax.set(title="Daily Prices, Summarised (2022 to 2024)", xlabel="Time of day", ylabel="Price ($/MWh)")
+clock_axis(ax)
+ax.yaxis.set_major_formatter(dollars)
+ax.legend(frameon=False, loc="upper left")
+finish(fig, "08a-daily-rhythm-bands.png")
+```
+
+We give the operator exactly the knowledge in that water-value example, learned from real data rather than assumed. From that cloud of days to a decision, the forecaster is built in four steps:
+
+1. **Compress prices into 16 buckets**, from "strongly negative" up to "extreme spike", so that "where is the price right now?" always has one of sixteen answers.
+2. **Estimate the odds of the next move**: for every half-hour of the day, a 16-by-16 table of probabilities for where the price sits next, given where it sits now (the *transition matrix*, drawn below once fitted).
+3. **Attach a dollar value to stored energy** in every situation (time of day, price bucket, store level) by backward induction: the *water value*.
+4. **Act by comparison**: generate when the price beats the water value, pump when it sits below the water value less the round-trip loss, and otherwise wait.
+
+Steps 1 and 2 are the operator's *beliefs*; steps 3 and 4 turn those beliefs into a *rule*. The paragraphs below expand each in turn.
 
 **What the operator believes.** Prices are grouped into 16 buckets, from "strongly negative" up to "extreme spike". From history we estimate, for every half hour of the day, the odds of moving from each bucket to each other bucket in the next half hour. This is a <abbr title="A model where the odds of what happens next depend only on the current situation, not the full history. Here: the odds of the next half-hour's price bucket, given the current bucket and the time of day.">Markov model</abbr> of the price: it knows the daily rhythm and how sticky prices are, but it never knows what will actually happen.
+
+::: {.callout-note collapse="true"}
+#### How the beliefs are estimated, step by step
+
+1. **Pool the training prices** (2022 to 2024: 52,608 half-hours) and cut them into 16 buckets with equal head-count, so each bucket holds exactly 6.25% of the observations. Equal head-count rather than equal dollar-width spends the model's resolution where the data actually lives: the everyday \$38 to \$150 range gets many fine buckets of its own, while a single wide bucket absorbs everything above \$300.
+2. **Count the moves.** For each of the 48 half-hour slots of the day and each pair of buckets (i, j), count how often the price sat in bucket i at that slot and in bucket j one half-hour later. Only genuinely consecutive half-hours count (a pair straddling a data gap does not), and no move is counted across a year boundary.
+3. **Keep rare moves possible.** Add one phantom observation to every cell (Laplace smoothing), so a jump never seen in three years keeps a small positive probability rather than being declared impossible. Three years is long enough to learn the rhythm, not long enough to have seen every extreme.
+4. **Turn counts into odds.** Divide each row by its total. The result is 48 tables of 16 × 16 probabilities, and that is the operator's *entire* view of the future: no gas prices, no weather forecasts, no order book. Just: given where the price is now and the time of day, where does it tend to go next?
+:::
 
 **What the operator decides.** At every half hour the operator sees the time of day, the current price bucket, and how full the store is, and picks one of three actions: pump at full power, do nothing, or generate at full power (Assumption A13).
 
@@ -1111,6 +1218,247 @@ print(f"Fitted the price pattern and solved for the stationary decision rule in 
       f"{learned['sweeps']} one-day sweeps to reach the $100 span tolerance.")
 ```
 
+#### The beliefs, fitted
+
+Before the rule, the beliefs themselves. First, the buckets: sixteen price levels, cut so that each holds an equal 6.25% share of the training half-hours. The everyday range gets fine resolution, the extremes get one wide bucket each way.
+
+::: {.callout-note collapse="true"}
+#### The 16 buckets, in dollars
+
+```{python}
+#| code-summary: "Tabulate the fitted buckets: range and average of each"
+# The bucket boundaries are quantiles of the pooled training prices, so every bucket holds the
+# same number of half-hours; the averages below are the prices the solver plans with.
+finite_edges = np.quantile(np.concatenate([prices_by_year[y].to_numpy() for y in TRAIN_YEARS]),
+                           np.linspace(0, 1, price_model.n_bins + 1))
+bucket_rows = []
+for k in range(price_model.n_bins):
+    if k == 0:
+        span = f"below ${finite_edges[1]:,.0f}"
+    elif k == price_model.n_bins - 1:
+        span = f"${finite_edges[k]:,.0f} and above"
+    else:
+        span = f"${finite_edges[k]:,.0f} to ${finite_edges[k+1]:,.0f}"
+    bucket_rows.append({"Bucket": k + 1, "Range ($/MWh)": span,
+                        "Average ($/MWh)": f"${price_model.rep_price[k]:,.0f}"})
+pd.DataFrame(bucket_rows).set_index("Bucket")
+```
+
+:::
+
+Second, the counting. Everything in the fitted model is estimated by sorting and counting, and the three figures below walk one slice of that estimation end to end: the step from 7:00 am to 7:30 am. Start with a single morning. The model's raw material is a pair of prices, where the price sat at 7:00 am and where it sat one half-hour later; the morning below contributes exactly one such pair, and everything else about the day is ignored.
+
+```{python}
+#| code-summary: "Zoom in on one training morning: the pair of prices the model learns from"
+# One real training morning, zoomed to the window around 7:00 am. The model's raw material
+# is the PAIR (price at 7:00 am, price at 7:30 am); the rest of the morning is context it
+# ignores. The morning is chosen deterministically: among mornings whose 7:00 am price sits
+# in the busiest 7:00 am bucket and whose 7:30 am price lands one bucket lower, take the
+# median morning by 7:00 am price (a typical example of the commonest starting point).
+BELIEF = "#7b52ab"                   # purple, reserved for the forecaster's beliefs and results
+
+slot_of_obs = train_days.index.hour * 2 + train_days.index.minute // 30
+at_700, at_730 = train_days[slot_of_obs == 14], train_days[slot_of_obs == 15]  # 7:00 am / 7:30 am
+assert (at_700.index.normalize() == at_730.index.normalize()).all()   # every day has both, in order
+pairs = pd.DataFrame({"now": at_700.to_numpy(), "next": at_730.to_numpy()},
+                     index=at_700.index.normalize())
+assert len(pairs) == 1096, "expected one (7:00, 7:30) pair per training day"
+bin_now  = price_model.to_bin(pairs["now"].to_numpy())
+bin_next = price_model.to_bin(pairs["next"].to_numpy())
+FOCUS = int(np.bincount(bin_now, minlength=price_model.n_bins).argmax())  # busiest 7:00 am bucket
+
+falls = np.flatnonzero((bin_now == FOCUS) & (bin_next == FOCUS - 1))  # mornings stepping one bucket down
+assert falls.size > 0
+example = pairs.index[falls[np.argsort(pairs["now"].to_numpy()[falls])[len(falls) // 2]]]
+morning = train_days.loc[example + pd.Timedelta(hours=5.5): example + pd.Timedelta(hours=9)]
+hour_x = morning.index.hour + morning.index.minute / 60
+p_now, p_next = pairs.loc[example, "now"], pairs.loc[example, "next"]
+
+fig, ax = plt.subplots(figsize=(8, 4.2))
+for x0, shade in ((7.0, 0.24), (7.5, 0.12)):                # the two half-hours of the pair
+    ax.fill_between([x0, x0 + 0.5], 0, 1, transform=ax.get_xaxis_transform(),
+                    color=BELIEF, alpha=shade)
+ax.step(hour_x, morning.to_numpy(), where="post", color=INK, lw=2.2)
+ax.plot([7.25, 7.75], [p_now, p_next], "o", color=BELIEF, ms=7, zorder=3)
+def signed_dollars(v):
+    '''$17, or -$10 for a negative price (never the awkward $-10).'''
+    return f"-${abs(v):,.0f}" if v < 0 else f"${v:,.0f}"
+
+ax.annotate(f"7:00 am: {signed_dollars(p_now)}", xy=(7.25, p_now), xytext=(6.0, p_now + 28),
+            color=BELIEF, fontsize=10, fontweight="bold",
+            arrowprops=dict(arrowstyle="->", color=BELIEF))
+ax.annotate(f"7:30 am: {signed_dollars(p_next)}", xy=(7.75, p_next), xytext=(8.15, p_next + 34),
+            color=BELIEF, fontsize=10, fontweight="bold",
+            arrowprops=dict(arrowstyle="->", color=BELIEF))
+ax.set(title="One Price Transition (7:00 to 7:30 am)", xlabel="Time of day", ylabel="Price ($/MWh)")
+ax.set_xticks([6, 6.5, 7, 7.5, 8, 8.5, 9])
+ax.set_xticklabels(["6am", "6:30", "7am", "7:30", "8am", "8:30", "9am"])
+ax.set_xlim(5.5, 9)
+ax.yaxis.set_major_formatter(dollars)
+fig.text(0.005, -0.01, f"The morning of {example:%-d %B %Y}. Each half-hour has one settled price; "
+         "the pair the model records is the shaded one.",
+         ha="left", va="top", fontsize=8.5, color=INK2, style="italic")
+finish(fig, "08a2-one-transition.png")
+```
+
+Now all of them at once. Each of the 1,096 training days contributes its own pair, drawn below as one line from its 7:00 am price to its 7:30 am price. On the future side the sixteen fitted buckets take over from exact dollars: all the model asks of 7:30 am is *which bucket the price landed in*. On the current side one bucket is singled out, the busiest at 7:00 am (\$6 to \$38): the purple bundle holds the 128 mornings that began there, with the morning above as the bold line among them.
+
+```{python}
+#| code-summary: "Draw all 1,096 mornings' pairs, with the buckets on the 7:30 am side"
+# Every training morning as one faint line from its 7:00 am price to its 7:30 am price.
+# The sixteen bucket edges divide the right (future) side; the busiest 7:00 am bucket is
+# shaded on the left, and the mornings that start inside it (the bundle the next figure
+# counts) are drawn in purple, with the example morning above in bold.
+in_focus = bin_now == FOCUS
+assert FOCUS == 1 and in_focus.sum() == 128, "the busiest 7:00 am bucket moved; update the prose"
+lo, hi = price_model.edges[FOCUS], price_model.edges[FOCUS + 1]     # the $6 to $38 bucket
+
+fig, ax = plt.subplots(figsize=(8, 5))
+for sel, colour, alpha, lw in ((~in_focus, MUTED, 0.13, 0.6), (in_focus, BELIEF, 0.3, 0.8)):
+    ax.plot([0, 1], np.vstack([pairs["now"][sel], pairs["next"][sel]]),
+            color=colour, alpha=alpha, lw=lw)
+ax.plot([0, 1], [p_now, p_next], color=BELIEF, lw=2.6, zorder=4)    # the morning above, bold
+for e in price_model.edges[1:-1]:                                   # the bucket edges, future side
+    ax.plot([1.01, 1.05], [e, e], color=INK2, lw=1, clip_on=False)
+    ax.axhline(e, color=INK2, lw=0.5, ls=":", alpha=0.18)
+for k in (1, 5, 12, 15):                                            # a few edges labelled in dollars
+    ax.text(1.07, price_model.edges[k], f"${price_model.edges[k]:,.0f}",
+            fontsize=7.5, color=INK2, va="center", clip_on=False)
+ax.fill_betweenx([lo, hi], -0.06, 0.01, color=BELIEF, alpha=0.3, clip_on=False)
+ax.text(-0.09, (lo + hi) / 2, "the \\$6 to \\$38 bucket:\n128 mornings", ha="right", va="center",
+        color=BELIEF, fontsize=8.5)
+n_clipped = int(((pairs["now"] > 340) | (pairs["next"] > 340)).sum())
+ax.set(title="All 1,096 Training Mornings (7:00 to 7:30 am)", ylabel="Price ($/MWh)")
+ax.set_xticks([0, 1])
+ax.set_xticklabels(["7:00 am", "7:30 am"])
+ax.set_xlim(-0.5, 1.22)
+ax.set_ylim(-80, 340)
+ax.yaxis.set_major_formatter(dollars)
+ax.grid(False)
+fig.text(0.005, -0.01, f"Bucket edges marked on the right. {n_clipped} spike mornings run off the top "
+         "of the frame; the outermost buckets extend to the data's extremes.",
+         ha="left", va="top", fontsize=8.5, color=INK2, style="italic")
+finish(fig, "08a3-all-mornings.png")
+```
+
+Counting is all that remains. The third figure follows the purple bundle. Of the 128 mornings that began in the \$6 to \$38 bucket, 75 were still there at 7:30 am, 33 had slipped into the bucket below, 14 had climbed one bucket, and a handful moved further. Divide each count by 128 and the flows become probabilities: one full column of the 7:00 am transition table.
+
+```{python}
+#| code-summary: "Count the bundle's destinations and divide by 128: one column of odds"
+# Left: the 128 mornings fan out from their starting bucket to the bucket they landed in
+# at 7:30 am (ribbon width = count). Right: each count divided by 128, the estimated odds;
+# the black ticks show the same column AFTER the add-one smoothing the fitted table applies,
+# which is why the heatmaps below differ slightly from the raw shares.
+flow = np.bincount(bin_next[in_focus], minlength=price_model.n_bins)
+assert (flow[FOCUS - 1], flow[FOCUS], flow[FOCUS + 1]) == (33, 75, 14), "counts moved; update the prose"
+share = flow / flow.sum()
+fitted_col = price_model.transitions[14, FOCUS, :]                  # the smoothed column the solver uses
+
+def bucket_label(k):
+    '''Y-axis label for bucket k: its number and dollar range. Dollar signs are escaped so
+    matplotlib never reads a $...$ pair as mathtext.'''
+    e = price_model.edges
+    if k == 0:
+        return f"1: below \\${e[1]:,.0f}"
+    if k == price_model.n_bins - 1:
+        return f"{k + 1}: \\${e[k]:,.0f} and above"
+    return f"{k + 1}: \\${e[k]:,.0f} to \\${e[k + 1]:,.0f}"
+
+fig, (flow_ax, odds_ax) = plt.subplots(1, 2, figsize=(9, 5.2), sharey=True,
+                                       gridspec_kw={"width_ratios": [1.5, 1]})
+# ribbons in bucket-index space: a smooth cosine ramp from the source bucket's node (its
+# segments stacked bottom-to-top in destination order) to each destination bucket
+xs_ramp = np.linspace(0.06, 0.9, 60)
+ramp = (1 - np.cos(np.pi * (xs_ramp - xs_ramp[0]) / (xs_ramp[-1] - xs_ramp[0]))) / 2
+seg_bottom = FOCUS - 0.42                                           # the source node spans +-0.42 buckets
+for k in np.flatnonzero(flow):
+    h = share[k] * 0.84                                             # ribbon width, in bucket units
+    y_src = seg_bottom + np.array([0.0, h])
+    seg_bottom += h
+    y_dst = np.array([k - h / 2, k + h / 2])
+    flow_ax.fill_between(xs_ramp, y_src[0] + (y_dst[0] - y_src[0]) * ramp,
+                         y_src[1] + (y_dst[1] - y_src[1]) * ramp, color=BELIEF, alpha=0.42, lw=0)
+    flow_ax.fill_between([0.9, 0.96], k - h / 2, k + h / 2, color=BELIEF, alpha=0.85)  # arrival stub
+    if flow[k] >= 3:
+        flow_ax.text(0.88, k, f"{flow[k]}", ha="right", va="center", fontsize=8.5, color=INK)
+flow_ax.fill_between([0.0, 0.06], FOCUS - 0.42, FOCUS + 0.42, color=BELIEF, alpha=0.95)  # source node
+flow_ax.text(-0.03, FOCUS, "128\nmornings", ha="right", va="center",
+             color=BELIEF, fontsize=8.5, fontweight="bold")
+flow_ax.set_yticks(range(price_model.n_bins))
+flow_ax.set_yticklabels([bucket_label(k) for k in range(price_model.n_bins)], fontsize=7.4)
+flow_ax.set_xticks([0.03, 0.93])
+flow_ax.set_xticklabels(["7:00 am", "7:30 am"])
+flow_ax.set_xlim(-0.28, 1.0)
+flow_ax.set_ylim(-0.6, price_model.n_bins - 0.4)
+flow_ax.grid(False)
+flow_ax.set_title("Where the 128 mornings went", fontsize=10.5)
+odds_ax.barh(range(price_model.n_bins), share * 100, color=BELIEF, alpha=0.85, height=0.72)
+odds_ax.plot(fitted_col * 100, range(price_model.n_bins), marker="|", ms=9, ls="none", color=INK)
+for k in np.flatnonzero(share >= 0.02):                             # label the visible odds
+    odds_ax.text(share[k] * 100 + 1.2, k, f"{share[k] * 100:.0f}%", va="center", fontsize=8.5, color=INK)
+odds_ax.set_xlabel("Probability (%)")
+odds_ax.set_xlim(0, 68)
+odds_ax.grid(axis="x")
+odds_ax.set_title("Divided by 128: the odds", fontsize=10.5)
+odds_ax.legend(handles=[plt.Line2D([], [], marker="|", ms=9, ls="none", color=INK,
+                                   label="After add-one smoothing")],
+               frameon=False, loc="upper right", fontsize=7.5)
+fig.suptitle("From Counts to Odds (7:00 am)", fontsize=13, fontweight="bold")
+fig.text(0.005, -0.01, "The fitted table adds one phantom observation to every cell (Laplace smoothing) "
+         "before dividing, so moves never seen in three years keep small positive odds.",
+         ha="left", va="top", fontsize=8.5, color=INK2, style="italic")
+finish(fig, "08a4-counts-to-odds.png")
+```
+
+Assembled for every starting bucket, those columns of odds become one 16-by-16 transition table for the 7:00 am slot; repeated for each half-hour of the day, they become the model's 48 tables. Two are drawn below; to read them, pick the current price on the horizontal axis, and the column above it gives the odds of each price one half-hour later (the column just built is the second from the left in the first panel). The dark diagonal in both says prices are sticky: the single most likely next price is almost always the current one. The lean *around* the diagonal is the forecast: at 7:00 am the mass sits below the diagonal (cheaper next), because solar is about to flood the market; at 4:00 pm it sits above the diagonal (more expensive next), because the evening peak is building. That lean, estimated separately for every half-hour of the day, is all the "forecasting" the forecaster ever does.
+
+```{python}
+#| code-summary: "Draw two of the 48 fitted transition tables as heatmaps"
+# Each panel is one fitted transition table, drawn with the CURRENT price on the x axis and
+# the NEXT half-hour's price on the y axis, shade = fitted probability (so each vertical
+# column of cells is one distribution over what happens next). A single purple ramp (light =
+# rare, dark = likely); purple is reserved throughout for the forecaster's beliefs and results.
+from matplotlib.colors import LinearSegmentedColormap
+belief_ramp = LinearSegmentedColormap.from_list("belief", [SURFACE, BELIEF])
+
+show_slots = ((14, "About to fall", "7:00 am", "7:30 am"),
+              (32, "About to climb", "4:00 pm", "4:30 pm"))
+vmax = max(price_model.transitions[t].max() for t, *_ in show_slots)
+tick_buckets = [0, 4, 8, 12, 15]
+fig, axes = plt.subplots(1, 2, figsize=(9, 4.7))
+fig.subplots_adjust(wspace=0.34)              # room for the right panel's own y label
+for ax, (t, label, now_time, next_time) in zip(axes, show_slots):
+    mesh = ax.pcolormesh(np.arange(17), np.arange(17), price_model.transitions[t].T,
+                         cmap=belief_ramp, vmin=0, vmax=vmax)     # transposed: columns = now
+    ax.plot([0, 16], [0, 16], color=INK2, ls=":", lw=1)          # the stay-put diagonal
+    ax.set_xticks([b + 0.5 for b in tick_buckets])
+    ax.set_xticklabels([f"${price_model.rep_price[b]:,.0f}" for b in tick_buckets], fontsize=8)
+    ax.set_yticks([b + 0.5 for b in tick_buckets])
+    ax.set_yticklabels([f"${price_model.rep_price[b]:,.0f}" for b in tick_buckets], fontsize=8)
+    ax.grid(False)
+    ax.set_title(label, fontsize=10.5)
+    ax.set_xlabel(f"Price at {now_time} ($/MWh)")
+    ax.set_ylabel(f"Price at {next_time} ($/MWh)")
+fig.suptitle("Transition Probability for Prices", fontsize=13, fontweight="bold")
+cbar = fig.colorbar(mesh, ax=axes, shrink=0.85, pad=0.02)
+cbar.set_label("Fitted probability")
+finish(fig, "08b-transition-odds.png")
+```
+
+```{python}
+#| code-summary: "Read one slice of the fitted model in plain words"
+_slot, _price = 35, 100.0                                 # 5:30 pm, with the price near $100
+_k = int(price_model.to_bin(np.array([_price]))[0])
+_row = price_model.transitions[_slot, _k]
+display(Markdown(
+    f"One slice of the model, read aloud: at **5:30 pm**, with the price in the **\\${price_model.rep_price[_k]:,.0f} "
+    f"bucket**, the fitted odds are **{_row[_k]*100:.0f}% stay put**, **{_row[_k+1:].sum()*100:.0f}% move up** "
+    f"(including {_row[_k+2:].sum()*100:.0f}% by two buckets or more: the evening ramp), and "
+    f"**{_row[:_k].sum()*100:.0f}% move down**. The operator never knows which will happen. It only ever "
+    f"holds these odds, and the decision rule below is the best possible standing response to them."
+))
+```
+
 #### The estimated decision rule
 
 The whole strategy compresses into one picture. The map below fixes the clock at 6 pm and shows the chosen action at every store level and price bucket: pump (blue) when the price is low, generate (orange) when it is high, and wait (grey) in the band between, where the price gap cannot cover the round-trip loss. The two boundaries are the water value at work, and they slide with the store level exactly as intuition says they should. Nearly empty, stored energy is precious: the rule buys at prices up to about \$110/MWh and refuses to sell below the \$200 price rows. Nearly full, stored energy is cheap to it: the rule only buys below about \$70 and starts selling from about \$110. Nothing here was told to do that; it fell out of the backward induction on its own.
@@ -1135,15 +1483,82 @@ label_buckets = [0, 4, 8, 12, 15]                                 # a few repres
 ax.set_yticks([b + 0.5 for b in label_buckets])
 ax.set_yticklabels([f"${price_model.rep_price[b]:,.0f}" for b in label_buckets])
 ax.grid(False)
-ax.set(title="The Learned Rule: Fussier Buyer and Easier Seller as the Store Fills",
-       xlabel="State of charge (GWh)", ylabel="Price level ($/MWh, bucket average)")
+ax.set(title="Forecaster Decision Rule, 6 pm",
+       xlabel="State of charge (GWh)", ylabel="Price level ($/MWh)")
 ax.legend(handles=[Patch(color=BUY, label="Pump (buy)"), Patch(color="#d8d6cf", label="Wait"),
                    Patch(color=SELL, label="Generate (sell)")],
           frameon=False, loc="upper left", bbox_to_anchor=(0, -0.18), ncol=3)
 finish(fig, "09-learned-rule.png")
 ```
 
-One result we did not impose: re-drawing this map for any other hour of the day barely moves it (at most 2% of its cells change). Snowy's reservoir is so deep, roughly 160 hours at full power, that no single day can fill or drain much of it, so the *clock* hardly matters and the *store level* is everything. In effect the learned strategy is a pair of price triggers that adapt to how full the store is. That is also exactly where Scheme 2 leaves money on the table: its two triggers are frozen for the whole year, while this rule slides them with the store level and places them where the water value says they belong.
+One result we did not impose: re-drawing this map for any other hour of the day barely moves it (at most 2% of its cells change). Snowy's reservoir is so deep, roughly 160 hours at full power, that no single day can fill or drain much of it, so the *clock* hardly matters and the *store level* is everything. In effect the learned strategy is a pair of price triggers that adapt to how full the store is. That is also exactly where Scheme 2 leaves money on the table: its two triggers are frozen for the whole year, while this rule slides them with the store level and places them where the water value says they belong. The next figure makes the clock's near-irrelevance visible directly, and shows it is a property of Snowy, not of the method.
+
+#### Does the clock change the rule?
+
+A natural intuition about storage says it should: you might pump at a higher price in the early afternoon than in the evening, because the evening is expected to be more expensive still. The figure below tests that intuition, one panel per plant. At every half-hour of the day, holding each store at half of its own capacity, it reads two prices off the fitted rule: the highest price at which the rule still pumps (blue) and the lowest at which it generates (orange). Between them sits the **wait zone** (grey), the prices at which the rule does nothing; prices below the blue line trigger pumping, prices above the orange line trigger generating. For Snowy (left) the two triggers barely move all day: with about 160 hours of storage behind every decision, no single half-hour's outlook can change what a stored megawatt-hour is worth, so the time of day all but drops out of the rule. To show that this is the reservoir's depth and not a limitation of the method, the right panel re-solves the identical problem for a store holding just four hours at full power: there the clock is everything, exactly as the intuition says.
+
+```{python}
+#| code-summary: "Re-solve for a battery-depth store and extract both rules' triggers through the day"
+def triggers_by_slot(rule, model, soc_frac=0.5):
+    '''For each half-hour slot of the day, a rule's two working triggers at a given store
+    fullness: the highest bucket average at which it still pumps, and the cheapest at which
+    it generates. NaN where the rule takes no such action at any price in that slot.'''
+    soc_ix = int(round(soc_frac * (len(rule["soc_grid"]) - 1)))
+    buy_t, sell_t = np.full(model.slots, np.nan), np.full(model.slots, np.nan)
+    for t in range(model.slots):
+        actions = rule["policy"][t, soc_ix, :]
+        pumps = np.flatnonzero(actions == 1)
+        gens  = np.flatnonzero(actions == 2)
+        if pumps.size:
+            buy_t[t] = model.rep_price[pumps.max()]
+        if gens.size:
+            sell_t[t] = model.rep_price[gens.min()]
+    return buy_t, sell_t
+
+# The same beliefs and solver, but a store with four hours at full power instead of ~160.
+battery_depth = replace(snowy, dischargeable_mwh=4 * snowy.power_mw)
+learned_battery = solve_known_distribution(price_model, battery_depth)
+assert learned_battery["converged"], "the battery-depth value iteration hit its sweep cap"
+
+snowy_buy, snowy_sell = triggers_by_slot(learned, price_model)
+batt_buy,  batt_sell  = triggers_by_slot(learned_battery, price_model)
+slot_hours = np.arange(price_model.slots) / 2
+
+fig, axes = plt.subplots(1, 2, figsize=(9, 4.4), sharey=True)
+panels = ((axes[0], snowy_buy, snowy_sell, "Snowy 2.0: ~160 hours of storage"),
+          (axes[1], batt_buy, batt_sell, "Same power, 4 hours of storage"))
+for ax, buy_t, sell_t, label in panels:
+    ax.fill_between(slot_hours, buy_t, sell_t, step="post", color="#d8d6cf", alpha=0.55)
+    ax.step(slot_hours, sell_t, where="post", color=SELL, lw=2.4)
+    ax.step(slot_hours, buy_t, where="post", color=BUY, lw=2.4)
+    ax.set_title(label, fontsize=10.5)
+    ax.set_xlabel("Time of day")
+    clock_axis(ax, step=6)
+axes[0].set_ylim(0, 300)                          # shared; the battery's sell trigger exits on purpose
+axes[0].yaxis.set_major_formatter(dollars)
+axes[0].set_ylabel("Price ($/MWh)")
+# direct labels on the left panel carry the reading for both
+axes[0].text(12, 150, "generates at or above", color=SELL, fontsize=9, ha="center")
+axes[0].text(12, 100, "waits", color=INK2, fontsize=9, ha="center")
+axes[0].text(12, 55, "pumps at or below", color=BUY, fontsize=9, ha="center")
+# the battery's story, annotated where it happens (the peak pump trigger, read live); the
+# two notes sit in the panel's empty corners so their arrows stay clear of each other
+_pk = int(np.nanargmax(batt_buy))
+axes[1].annotate(f"pays up to ${np.nanmax(batt_buy):,.0f} to fill\nahead of the peak",
+                 xy=(slot_hours[_pk], batt_buy[_pk]), xytext=(0.6, 255), va="top",
+                 color=BUY, fontsize=8.5, arrowprops=dict(arrowstyle="->", color=BUY))
+axes[1].annotate("sell trigger leaves the chart:\nnothing is for sale before the peak",
+                 xy=(15.1, 293), xytext=(8.8, 22), color=SELL, fontsize=8.5,
+                 arrowprops=dict(arrowstyle="->", color=SELL))
+fig.suptitle("Trigger Prices Through the Day", fontsize=13, fontweight="bold")
+fig.text(0.005, -0.01, "Each store is read at half of its own capacity: about 80 hours of energy for "
+         "Snowy, two for the battery. Each trigger is the fitted rule's marginal price "
+         "bucket: the highest at which it still pumps, the lowest at which it generates.",
+         ha="left", va="top", fontsize=8.5, color=INK2, style="italic")
+finish(fig, "09b-triggers-by-clock.png")
+```
+
+The contrast carries the answer. A four-hour store lives inside a single day, so its rule is all clock: by mid-afternoon it will pay about \$164/MWh to top itself up ahead of the peak, roughly twice what it pays overnight, and through the afternoon it refuses to sell at any everyday price at all (its sell trigger jumps to the extreme-spike bucket, off the top of the chart), hoarding its four hours for the evening. Once the peak passes, both triggers collapse back. Snowy, holding a week and a half of energy, pumps below about \$90 and generates above about \$120 at every hour of the day; its wait zone is a flat, narrow band. Depth substitutes for timing: Snowy's rule needs to know how full the store is, not what time it is. This is also why Scheme 2's frozen dollar-triggers get as close as they do for Snowy, and why the same two-trigger idea would fail badly for a battery.
 
 #### Performance in and out of sample
 
@@ -1167,16 +1582,18 @@ for year in YEARS:
     scheme3_by_year[year] = outcome
     ceiling = ceiling_by_year[year]["profit"]
     comparison_rows.append({
-        "Year": f"{year}{' (held out)' if year not in TRAIN_YEARS else ''}",
-        "S2 rule of thumb ($bn)": round(s2_by_year[year] / 1e9, 2),
-        "S3 forecaster ($bn)": round(outcome["profit"] / 1e9, 2),
-        "S1 ceiling ($bn)": round(ceiling / 1e9, 2),
-        "S3 share of ceiling": f"{outcome['profit'] / ceiling * 100:.0f}%",
+        "Year": f"{year}{'*' if year not in TRAIN_YEARS else ''}",
+        "Rule of thumb (S2), $bn": round(s2_by_year[year] / 1e9, 2),
+        "Forecaster (S3), $bn": round(outcome["profit"] / 1e9, 2),
+        "Perfect foresight (S1), $bn": round(ceiling / 1e9, 2),
+        "Forecaster share of S1": f"{outcome['profit'] / ceiling * 100:.0f}%",
         "Foresight gap ($bn)": round((ceiling - outcome["profit"]) / 1e9, 2),
         "Start = end store (GWh)": round(outcome["start_soc"] * snowy.eta_gen / 1e3, 1)})
 comparison = pd.DataFrame(comparison_rows).set_index("Year")
 comparison
 ```
+
+\* Out of sample: the two trained schemes commit to their rules on 2022 to 2024 before trading 2025.
 
 ```{python}
 #| code-summary: "State the held-out result and the boundary diagnostics"
@@ -1210,7 +1627,7 @@ display(Markdown(
 ))
 ```
 
-The same result as one picture: for each year, the grey square is the mechanical rule of thumb, the purple dot is the forecaster, and the open circle is the impossible ceiling. The distance from the purple dot up to the circle is the realised perfect-foresight gap.
+The same result as one picture: for each year, the grey square is the mechanical rule of thumb, the purple dot is the forecaster, and the open circle is perfect foresight (the ceiling). The distance from the purple dot up to the circle is the realised perfect-foresight gap.
 
 ```{python}
 #| code-summary: "Plot rule of thumb, forecaster, and ceiling for each year"
@@ -1237,13 +1654,15 @@ ax.annotate("", xy=(0.18, gap_top), xytext=(0.18, gap_bottom),
 ax.text(0.26, (gap_top + gap_bottom) / 2, "Perfect-foresight gap:\nwhat a perfect forecast\nwould have added",
         color=SPIKE, fontsize=9, va="center")
 ax.set_xticks(range(len(YEARS)))
-ax.set_xticklabels([f"{y}\n(held out)" if y not in TRAIN_YEARS else str(y) for y in YEARS])
-ax.set(title="Rule of Thumb, Forecaster, and Ceiling by Year", ylabel="Annual arbitrage profit ($bn)")
+ax.set_xticklabels([f"{y}*" if y not in TRAIN_YEARS else str(y) for y in YEARS])
+ax.set(title="Rule of Thumb, Forecaster, and Perfect Foresight by Year", ylabel="Annual arbitrage profit ($bn)")
 ax.yaxis.set_major_formatter(lambda x, _: f"${x:,.1f}")
-ax.legend(handles=[plt.Line2D([], [], marker="s", color=MUTED, ls="none", ms=9, label="S2 rule of thumb (fixed triggers)"),
-                   plt.Line2D([], [], marker="o", color=RESULT, ls="none", ms=11, label="S3 forecaster"),
-                   plt.Line2D([], [], marker="o", mfc="white", mec=INK, mew=2, ls="none", ms=10, label="S1 perfect foresight (ceiling)")],
+ax.legend(handles=[plt.Line2D([], [], marker="s", color=MUTED, ls="none", ms=9, label="Rule of thumb (S2)"),
+                   plt.Line2D([], [], marker="o", color=RESULT, ls="none", ms=11, label="Forecaster (S3)"),
+                   plt.Line2D([], [], marker="o", mfc="white", mec=INK, mew=2, ls="none", ms=10, label="Perfect foresight (S1)")],
           frameon=False, loc="upper left")
+fig.text(0.985, 0.02, "* 2025 is out of sample: the trained schemes commit to their rules on 2022 to 2024",
+         ha="right", fontsize=8, color=INK2, style="italic")
 finish(fig, "10-scheme-comparison.png")
 ```
 
@@ -1279,6 +1698,211 @@ convergence
 
 :::
 
+#### Decomposing the forecaster's profit
+
+The comparison above says how much the forecaster earned; the two views below open those earnings up. First by year: each bar is the year's generation revenue, split into what was paid for pumping energy, variable operating cost, and what was left as profit. Two things stand out. The pumping bill is nearly constant, about \$0.3 bn in every year, while the revenue side swings by a factor of two; years differ on what the plant *sells* for, not on what it pays. And the margin is fat: between 61% and 79% of every revenue dollar survives as profit, because the plant buys its energy at a small fraction of its selling price.
+
+```{python}
+#| code-summary: "Split each forecaster year's revenue into pumping cost, operating cost, and profit"
+# Decompose each forecaster year from its own scored dispatch: generation revenue = pumping
+# cost + variable O&M + profit. The identity is asserted against the year's reported profit,
+# so the segments can never drift from the headline numbers.
+dt = snowy.interval_hr
+decomp_rows = []
+for year in YEARS:
+    out = scheme3_by_year[year]
+    px = prices_by_year[year].to_numpy()
+    revenue = float((out["gen"] * px).sum() * dt)                # dollars earned generating
+    pump_cost = float((out["pump"] * px).sum() * dt)             # dollars paid to pump
+    var_om = float(snowy.var_om_per_mwh * out["gen"].sum() * dt) # variable O&M on generation
+    profit = revenue - pump_cost - var_om
+    assert abs(profit - out["profit"]) < 1e-3 * abs(out["profit"]), f"{year} decomposition drifted"
+    decomp_rows.append({"year": year, "revenue": revenue, "pump": pump_cost,
+                        "om": var_om, "profit": profit})
+decomp = pd.DataFrame(decomp_rows).set_index("year") / 1e9       # everything in $bn
+
+fig, ax = plt.subplots(figsize=(9, 4.6))
+xs = np.arange(len(YEARS))
+ax.bar(xs, decomp["pump"], width=0.6, color=BUY, alpha=0.85,
+       edgecolor=INK, linewidth=1.1, label="Pumping cost")
+ax.bar(xs, decomp["om"], width=0.6, bottom=decomp["pump"], color=MUTED, alpha=0.9,
+       edgecolor=INK, linewidth=1.1, label="Variable O&M")
+ax.bar(xs, decomp["profit"], width=0.6, bottom=decomp["pump"] + decomp["om"], color=RESULT,
+       alpha=0.9, edgecolor=INK, linewidth=1.1, label="Profit")
+for i, year in enumerate(YEARS):                                 # label the takeaway numbers
+    r = decomp.loc[year]
+    ax.text(i, r["pump"] + r["om"] + r["profit"] / 2, f"${r['profit']:.2f}bn",
+            ha="center", va="center", color="white", fontsize=9.5, fontweight="bold")
+    ax.text(i, r["pump"] / 2, f"${r['pump']:.2f}bn",
+            ha="center", va="center", color="white", fontsize=9.5, fontweight="bold")
+    ax.text(i, r["revenue"] + 0.03, f"revenue ${r['revenue']:.2f}bn",
+            ha="center", fontsize=8.5, color=INK2)
+ax.set_xticks(xs)
+ax.set_xticklabels([f"{y}*" if y not in TRAIN_YEARS else str(y) for y in YEARS])
+ax.set(title="Forecaster Revenue: Decomposition", ylabel="$ billion per year",
+       ylim=(0, decomp["revenue"].max() * 1.14))
+ax.yaxis.set_major_formatter(lambda x, _: f"${x:,.1f}")
+ax.legend(frameon=False, loc="upper left")
+fig.text(0.985, 0.02, "* 2025 is out of sample: the rule commits on 2022 to 2024",
+         ha="right", fontsize=8, color=INK2, style="italic")
+finish(fig, "10b-forecaster-decomposition.png")
+```
+
+Second, by month inside the held-out year. Winter carries 2025: June alone contributes about **\$304m** of the year's \$1,043m, essentially the entire perfect-foresight June (\$305m), because in the month of the spike sequence the right move is obvious to foresight and forecaster alike: sell everything the store holds. The collapse to \$22m in July is the other half of the same event, not a failure of the rule, and it has two parts. July 2025 was the mildest month of the year (its worst half-hour reached \$395; every other month crossed \$600), so there was little worth selling into. And the plant entered July nearly empty, the store drained to 11.5 GWh by the end of June, so it spent the month rebuilding: 396 pumping hours, the year's most, restored about 269 GWh, and the monthly ledger books that bill (\$49m, the year's largest) in July while the energy it bought earns its revenue only in the months that follow. In all three training years July out-earned June, so this is the June 2025 spikes at work, not a seasonal pattern. The hours columns also make the round-trip loss visible on the clock: the plant pumps roughly four hours for every three it generates, because almost a quarter of every stored megawatt-hour evaporates on the way through.
+
+```{python}
+#| code-summary: "Tabulate the forecaster's 2025 by month: hours, cost, revenue, profit"
+# The held-out year month by month, from the scored dispatch: how many hours the plant pumped
+# and generated, what pumping cost, what generating earned, and the profit left over.
+out25 = scheme3_by_year[2025]
+px25 = prices_by_year[2025]
+by_month = pd.DataFrame({"price": px25.to_numpy(), "pump": out25["pump"], "gen": out25["gen"]},
+                        index=px25.index).groupby(px25.index.month)
+monthly_2025 = pd.DataFrame({
+    "Pumping hours": by_month.apply(lambda d: (d["pump"] > 0).sum() * dt),
+    "Generating hours": by_month.apply(lambda d: (d["gen"] > 0).sum() * dt),
+    "Pumping cost ($m)": by_month.apply(lambda d: (d["pump"] * d["price"]).sum() * dt / 1e6),
+    "Variable O&M ($m)": by_month.apply(lambda d: snowy.var_om_per_mwh * d["gen"].sum() * dt / 1e6),
+    "Generation revenue ($m)": by_month.apply(lambda d: (d["gen"] * d["price"]).sum() * dt / 1e6),
+})
+monthly_2025["Profit ($m)"] = (monthly_2025["Generation revenue ($m)"]
+                               - monthly_2025["Pumping cost ($m)"] - monthly_2025["Variable O&M ($m)"])
+monthly_2025.index = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+monthly_2025.loc["Total"] = monthly_2025.sum()
+monthly_2025.rename_axis("Month (2025)").style.format("{:,.0f}")
+```
+
+The bars below repeat the table's profit column; the green line adds the store itself, whose drain into June and refill through July is the mechanism just described. The lower panel prices each month's trades and makes the same point in dollars: the plant sells at \$160 to \$200 a megawatt-hour in every ordinary month and at \$490 in June, while July pairs an ordinary sell price (\$181) with buying at \$56, the dearest refill of the year bar June itself.
+
+```{python}
+#| code-summary: "Plot the forecaster's 2025 profit by month, with the store level and trade prices"
+# Top panel: the profit column above as one bar per month, with the store level at each
+# month's end on a second axis (the June drain and July refill that explain the swing).
+# Bottom panel: the volume-weighted average price of each month's actual trades, one line
+# per leg, which shows WHY: June sells at $490/MWh, July sells at an ordinary price while
+# buying its refill at nearly the year's dearest.
+fig, (ax, trade_ax) = plt.subplots(2, 1, figsize=(9, 6.4), sharex=True,
+                                   gridspec_kw={"height_ratios": [2.0, 1.0], "hspace": 0.08})
+months = monthly_2025.index[:-1]                                 # drop the Total row
+profit_m = monthly_2025["Profit ($m)"].iloc[:-1]
+ax.bar(range(12), profit_m, color=RESULT, alpha=0.9, edgecolor=INK, linewidth=1.1)
+for i, v in enumerate(profit_m):                                 # the value on each bar
+    ax.text(i, v + 6, f"${v:,.0f}m", ha="center", fontsize=8.5, color=INK)
+ax.set(title="Forecaster Profit by Month (2025)", ylabel="Profit ($m)",
+       ylim=(0, profit_m.max() * 1.14))
+soc_end = (pd.Series(out25["stored"][:-1] * snowy.eta_gen / 1e3, index=px25.index)
+           .groupby(px25.index.month).last())                    # store at each month's end, GWh
+store_ax = ax.twinx()
+store_ax.plot(range(12), soc_end.to_numpy(), color=STORE, lw=2.2, marker="o", ms=4.5)
+store_ax.set_ylabel("State of charge,\nend of month (GWh)", color=STORE)
+store_ax.set_ylim(bottom=0)
+store_ax.tick_params(axis="y", colors=STORE)
+store_ax.spines["right"].set_color(STORE)
+store_ax.grid(False)
+store_ax.annotate(f"drained to {soc_end[6]:,.1f} GWh", xy=(5.15, soc_end[6]), xytext=(6.7, 130),
+                  color=STORE, fontsize=8.5, ha="left",
+                  arrowprops=dict(arrowstyle="->", color=STORE))
+# the trades that produced those profits: volume-weighted average price per month and leg
+buy_px  = by_month.apply(lambda d: (d["pump"] * d["price"]).sum() / d["pump"].sum())
+sell_px = by_month.apply(lambda d: (d["gen"]  * d["price"]).sum() / d["gen"].sum())
+trade_ax.plot(range(12), sell_px.to_numpy(), color=SELL, lw=2.2, marker="o", ms=4.5,
+              label="Average sell price")
+trade_ax.plot(range(12), buy_px.to_numpy(), color=BUY, lw=2.2, marker="o", ms=4.5,
+              label="Average buy price")
+trade_ax.annotate(f"${sell_px[6]:,.0f}", xy=(5, sell_px[6]), xytext=(5.55, sell_px[6] - 28),
+                  color=SELL, fontsize=9, fontweight="bold", va="top")
+trade_ax.annotate(f"${buy_px[7]:,.0f}", xy=(6, buy_px[7]), xytext=(6, buy_px[7] + 30),
+                  color=BUY, fontsize=9, fontweight="bold", ha="center")
+trade_ax.set_xticks(range(12))
+trade_ax.set_xticklabels(months)
+trade_ax.set_ylim(0, 560)
+trade_ax.set_ylabel("Trade price ($/MWh)")
+trade_ax.yaxis.set_major_formatter(dollars)
+trade_ax.legend(frameon=False, loc="upper left", fontsize=8.5, ncol=2)
+fig.text(0.005, -0.01, "Trade prices are the volume-weighted averages of the month's actual trades.",
+         ha="left", va="top", fontsize=8.5, color=INK2, style="italic")
+finish(fig, "10c-monthly-profit-2025.png")
+```
+
+#### The forecaster in action
+
+The two views that closed the perfect-foresight section, repeated for the forecaster's own dispatch on the held-out year. First, its profit ranked hour by hour. The shape is the ceiling's shape, slightly exaggerated: half the profit sits in the best ~250 hours (3% of the year, against the ceiling's 4%), and the curve peaks at 128% before giving back the pumping bill, a give-back two points deeper than the ceiling's. Both follow from the same fact: the forecaster earns less in total from the same spike hours, so those hours weigh more heavily in what it does earn, and its imperfect timing pays more for the energy it stores.
+
+```{python}
+#| code-summary: "Rank the forecaster's 2025 half-hours by profit and plot the cumulative share"
+# The ceiling's concentration figure, repeated for the forecaster: rank held-out 2025's
+# half-hours by the profit each contributed and accumulate. The per-half-hour profits are
+# rebuilt from the scored dispatch and asserted against the year's headline number.
+s3_close = scheme3_by_year[CLOSE_YEAR]
+px_close = price_close.to_numpy()
+s3_net = ((s3_close["gen"] - s3_close["pump"]) * px_close
+          - snowy.var_om_per_mwh * s3_close["gen"]) * snowy.interval_hr
+assert abs(s3_net.sum() - s3_close["profit"]) < 1e-3 * abs(s3_close["profit"]), "net dollars drifted"
+s3_sorted = np.sort(s3_net)[::-1]
+s3_cum = np.cumsum(s3_sorted) / s3_sorted.sum() * 100
+s3_hours = np.arange(1, len(s3_sorted) + 1) * 0.5
+s3_half = s3_hours[np.searchsorted(s3_cum, 50)]                  # hours that earn half the profit
+s3_peak = s3_cum.argmax()                                        # the last hour that still adds money
+
+fig, ax = plt.subplots()
+ax.plot(s3_hours, s3_cum, color=RESULT, lw=2.5)                  # purple: the forecaster's result
+ax.axhline(100, color=MUTED, lw=1, ls=":")
+ax.axhline(50, color=MUTED, lw=1, ls=":")
+ax.axvline(s3_half, color=SPIKE, lw=1, ls=":")
+ax.fill_between(s3_hours, s3_cum, where=(s3_hours <= s3_half), color=SPIKE, alpha=0.2)
+ax.annotate(f"The best ~{s3_half:,.0f} hours\n(~{s3_half / (len(s3_sorted) * 0.5) * 100:.0f}% of the year)\nearn half the profit",
+            xy=(s3_half, 50), xytext=(s3_half + 380, 22), color=SPIKE, fontsize=10,
+            arrowprops=dict(arrowstyle="->", color=SPIKE))
+ax.annotate(f"every money-making hour counted: {s3_cum[s3_peak]:.0f}%",
+            xy=(s3_hours[s3_peak], s3_cum[s3_peak]), xytext=(2500, 137),
+            color=INK2, fontsize=9, arrowprops=dict(arrowstyle="->", color=MUTED))
+ax.annotate("the descent is the pumping bill",
+            xy=(7900, float(s3_cum[int(7900 / 0.5) - 1])), xytext=(5500, 62),
+            color=BUY, fontsize=9, arrowprops=dict(arrowstyle="->", color=BUY))
+ax.set(title=f"Profit Distribution, Forecaster ({CLOSE_YEAR})",
+       ylabel="Cumulative share of the year's profit (%)",
+       xlim=(0, len(s3_sorted) * 0.5), ylim=(0, 144))
+# the x label as one line with reading arrows at each end, in place of a plain set_xlabel
+ax.text(0.5, -0.13, "Hours of the year, ranked by profit", transform=ax.transAxes, ha="center", color=INK)
+ax.text(0, -0.13, "← most profitable", transform=ax.transAxes, ha="left", fontsize=9, color=INK2)
+ax.text(1, -0.13, "least profitable →", transform=ax.transAxes, ha="right", fontsize=9, color=INK2)
+finish(fig, "10d-forecaster-profit-concentration.png")
+```
+
+Second, the same winter week the optimal schedule was drawn on. The price line is identical; only the behaviour differs. The forecaster spends 30 June selling its last stored energy into the tail of June's spikes, touches near-empty (under 5 GWh) on 1 July, and passes the mild days that follow rebuilding: 152 pumping half-hours against 113 generating across the week, with the store climbing to about 70 GWh by the weekend. Perfect foresight, knowing the quiet week ahead, swung the same store between empty and 129 GWh; the forecaster, seeing only odds, rebuilds steadily and keeps selling the evening peaks as they come.
+
+```{python}
+#| code-summary: "Plot the forecaster's week: price, actions, and state of charge in one panel"
+# The perfect-foresight week figure, repeated for the forecaster's dispatch over the same
+# seven days (the June to July handover), so the two panels compare like for like. `week`,
+# `week_index` and `pos` carry over from that figure's cell.
+s3_store_gwh = s3_close["stored"][pos] * snowy.eta_gen / 1e3     # start-of-half-hour level, generatable GWh
+
+fig, price_ax = plt.subplots(figsize=(9, 4.8))
+price_ax.fill_between(week_index, 0, 1, where=s3_close["pump"][pos] > 0, step="mid",
+                      transform=price_ax.get_xaxis_transform(), color=BUY, alpha=0.15)
+price_ax.fill_between(week_index, 0, 1, where=s3_close["gen"][pos] > 0, step="mid",
+                      transform=price_ax.get_xaxis_transform(), color=SELL, alpha=0.15)
+price_ax.plot(week_index, price_close.loc[week].values, color=INK, lw=1.6, zorder=3)
+price_ax.set(title="The Forecaster's Week (30 June to 6 July 2025)", ylabel="Price ($/MWh)")
+price_ax.yaxis.set_major_formatter(dollars)
+store_ax = price_ax.twinx()                                      # state of charge as a bold green line
+store_ax.plot(week_index, s3_store_gwh, color=STORE, lw=2.4)
+store_ax.set_ylabel("State of charge (GWh)", color=STORE)
+store_ax.set_ylim(bottom=0)
+store_ax.tick_params(axis="y", colors=STORE)
+store_ax.spines["right"].set_color(STORE)
+# in-figure legend, matching the perfect-foresight panel, placed under the plot
+price_ax.legend(handles=[plt.Line2D([], [], color=INK, lw=1.6, label="Price"),
+                         plt.Line2D([], [], color=STORE, lw=2.4, label="State of charge"),
+                         Patch(color=BUY, alpha=0.3, label="Pumping"),
+                         Patch(color=SELL, alpha=0.3, label="Generating")],
+                frameon=False, loc="upper center", ncol=4, fontsize=8.5, bbox_to_anchor=(0.5, -0.22))
+fig.autofmt_xdate()
+finish(fig, "10e-forecaster-week.png")
+```
+
 ### Implied prices and utilisation
 
 Three statistics summarise a whole year of dispatch: the volume-weighted average buy price, the volume-weighted average sell price, and the capacity factor. They compress the backtest into the units any project cash-flow model consumes. The table reports them for the ceiling and for the forecaster, both measured on the held-out year (2025) so neither is flattered by in-sample knowledge; each scheme's implied prices come from its own realised trades, and Scheme 3's column uses the repeated-year boundary disclosed above. The pattern to notice: the plant earns its money on the spread, buying near the bottom of the market and selling at several times its buy price, while running well below full utilisation.
@@ -1297,11 +1921,13 @@ s3_buy, s3_sell = implied_prices(scheme3_by_year[2025], prices_by_year[2025].to_
 s3_cf = scheme3_by_year[2025]["capacity_factor"]
 s1 = ceiling_by_year[2025]
 summary_stats = pd.DataFrame({
-    "S1 ceiling (2025)": [f"{s1['mean_buy']:.0f}", f"{s1['mean_sell']:.0f}", f"{s1['capacity_factor']:.0%}"],
-    "S3 forecaster (2025, held out)": [f"{s3_buy:.0f}", f"{s3_sell:.0f}", f"{s3_cf:.0%}"],
-}, index=["Mean buy price ($/MWh)", "Mean sell price ($/MWh)", "Capacity factor"])
+    "Perfect foresight (S1)": [f"{s1['mean_buy']:.0f}", f"{s1['mean_sell']:.0f}", f"{s1['capacity_factor']:.0%}"],
+    "Forecaster (S3)*": [f"{s3_buy:.0f}", f"{s3_sell:.0f}", f"{s3_cf:.0%}"],
+}, index=["Mean buy (pump) price ($/MWh)", "Mean sell (generate) price ($/MWh)", "Capacity factor"])
 display(summary_stats)
 ```
+
+\* Both columns are measured on 2025; the forecaster's rule is out of sample there, trained only on 2022 to 2024.
 
 ```{python}
 #| code-summary: "Assemble the collapsed note for the group's Excel NPV model"
@@ -1330,7 +1956,14 @@ display(HTML(
     f"learned pattern, and the forecaster still made <strong>${s3_crisis:.2f} bn</strong>. "
     "Every figure assumes the plant does not move the price (A1); at 2,200 MW it will, in the "
     "direction that shrinks these margins, so treat the central case as an optimistic central, "
-    "not a fair one.</p></details>"
+    "not a fair one.</p>"
+    "<p>The appendix table <em>Annual results for financial modelling</em> carries the same "
+    "statistics for every scheme and year, with volume-weighted P10/P50/P90 spreads for each "
+    "leg; use those columns to parameterise the sensitivity and risk tabs instead of guessing "
+    "symmetric bands. The appendix section <em>A simulation-grounded risk pass</em> goes one "
+    "step further: it states the exact input distributions the backtest justifies (an annual "
+    "year-draw plus two Perts) and shows the NPV distribution a Monte Carlo run built on them "
+    "should produce, as a cross-check for the spreadsheet's own risk run.</p></details>"
 ))
 ```
 
@@ -1340,7 +1973,9 @@ display(HTML(
 
 **What foresight is worth.** The realised perfect-foresight gap between the realistic operator and the ceiling is modest in normal years and explodes in 2022. Perfect forecasting is not where the project's value hides; anticipating rare crises is, and no one can promise that.
 
-**What we cannot say.** Every scheme still over-states revenue, for one dominant reason and several small ones. The dominant one is Assumption A1: Snowy is not a price taker. At 2,200 MW it pushes evening prices down when it sells and afternoon prices up when it buys, shrinking its own margin, most of all in the extreme hours where the profit concentrates (the concentration chart in Scheme 1). The small ones all lean the same way: no outages (A11), no ramp or start-up limits (A8), no network constraints (A12), no drought (A9). A separate limit is the evidence base itself: four years is a short record, and the central scheme's edge assumes the future keeps resembling the 2022 to 2024 prices it learned from. A structural shift, from new storage, fresh transmission, or a changed generation mix, could move that pattern out from under it. A serious price-impact correction is the natural next step of this work.
+**What we cannot say.** Every scheme still over-states revenue, for one dominant reason and several small ones. The dominant one is Assumption A1: Snowy is not a price taker. At 2,200 MW it pushes evening prices down when it sells and afternoon prices up when it buys, shrinking its own margin, most of all in the extreme hours where the profit concentrates (the concentration chart in Scheme 1). The small ones all lean the same way: no outages (A11), no ramp or start-up limits (A8), no network constraints (A12), no drought (A9). A separate limit is the evidence base itself: four years is a short record, and the central scheme's edge assumes the future keeps resembling the 2022 to 2024 prices it learned from. A structural shift, from new storage, fresh transmission, or a changed generation mix, could move that pattern out from under it. A first-pass, reduced-form price-impact band in the appendix quantifies the direction: every plausible impact slope takes a material bite out of the ceiling. A serious bid-stack correction remains the natural next step of this work.
+
+**From profits to project value.** A simulation-grounded risk pass in the appendix pushes the backtest through a standard project cash-flow model. On the held-out 2025 inputs and the official \$12 billion capital cost the project returns **4.85% real after tax**: comfortably positive at a 3% real discount rate, deeply negative at 7%, with a 7% break-even sell price (\$324/MWh) above anything a full-scale operator achieved in four years of real prices. Drawing whole years from the backtest and letting capital cost and efficiency vary within defensible bounds does not soften the shape of that verdict: at 7% essentially no draw of ten thousand comes out positive, while at 3% the project is roughly a coin flip, decided by capital-cost discipline and by whether future years look like 2025 or like the 2022 crisis. The discount rate and the capital cost decide this project; the operating strategy defends it.
 
 **Interactive companion.** The page [`snowy-arbitrage-demo.html`](snowy-arbitrage-demo.html) lets the reader vary the two trigger prices of Scheme 2 and watch the profit respond, with the ceiling drawn in for comparison.
 
@@ -1374,7 +2009,7 @@ The Model states up front only the assumptions that move the answer most; this i
 
 | \# | Assumption | Why we make it | Effect on the estimate | Tested? |
 |---------------|---------------|---------------|---------------|---------------|
-| **A1** | Snowy is a **price taker** | Standard first pass; keeps every scheme fast and clean | **Over-states** profit, probably a lot | Pending (a price-impact model) |
+| **A1** | Snowy is a **price taker** | Standard first pass; keeps every scheme fast and clean | **Over-states** profit, probably a lot | **First pass**: the reduced-form band in the appendix |
 | **A2** | **Perfect foresight** of prices (S1 only) | Defines the ceiling we measure everything against | **Over-states** profit | **Yes**: S3 removes it |
 | **A3** | Round trip is **77%**, split evenly across the two legs | We only know the product; profit depends on the product alone | Neutral | Not needed |
 | **A4** | Storage is **350 GWh**, taken at face value | Snowy's headline figure, though the cyclable capacity is disputed | Possibly over-states | **Yes**: shown non-binding in the Analysis |
@@ -1428,9 +2063,132 @@ display(Markdown(
 ))
 ```
 
+### A first pass at price impact (relaxing A1)
+
+Everything above assumes the plant can trade without moving the price (A1). At 2,200 MW that is false: selling into the evening peak pushes that peak down, and pumping through the cheap midday pulls the trough up, and both squeeze exactly the price gap the plant lives on. This section asks the question that follows: **how much of the 2025 profit survives once the plant pays for its own footprint?**
+
+The model is deliberately simple. The price the plant actually clears at moves in proportion to its own net injection: adjusted price = spot − β × (generation − pumping). The slope β is the only new parameter, and no public estimate of it exists for NSW (a serious one needs residual-demand or bid-stack data), so rather than pretend to know it we sweep four values and label each by the most tangible number it implies: how far the price moves when the plant trades at full power. The four scenarios move the full-power price by \$5.50, \$11, \$22 and \$44/MWh, which we believe brackets any defensible estimate.
+
+With the quadratic revenue term the perfect-foresight problem stops being a linear program, but it stays concave, so it can still be solved exactly up to a stated tolerance: we replace the quadratic with a fine piecewise-linear outer approximation (33 tangent lines), solve the resulting linear program with the same solver as Scheme 1, and then recompute the schedule's profit under the exact quadratic prices. The linear program's objective is an upper bound on the true optimum and the recomputed profit is a lower bound, so the pair brackets the truth; the code asserts the bracket is tighter than half a percent. The re-optimised operator adapts to its own footprint, trading fewer megawatt-hours and spreading them across more moderate hours; for comparison we also price the *unadapted* schedule (the price-taker's plan executed under impact pricing), which shows what re-optimisation recovers.
+
+```{python}
+#| code-summary: "Solve the 2025 ceiling under price impact across a band of slopes"
+def solve_with_price_impact(prices: np.ndarray, plant: StoragePlant, beta: float,
+                            knots: int = 33) -> dict:
+    '''Perfect-foresight dispatch when the plant's own net injection moves the price by
+    beta $/MWh per MW. The concave quadratic profit is maximised through a piecewise-linear
+    outer approximation (lower tangents of net^2), so HiGHS still solves it exactly as an LP;
+    the schedule's profit is then recomputed under the exact quadratic prices.'''
+    n, dt, P = len(prices), plant.interval_hr, plant.power_mw
+    pump   = cp.Variable(n, nonneg=True)
+    gen    = cp.Variable(n, nonneg=True)
+    stored = cp.Variable(n + 1, nonneg=True)
+    w      = cp.Variable(n, nonneg=True)          # stands in for net^2 via tangent cuts
+    net = gen - pump
+    constraints = [pump <= P, gen <= P, stored <= plant.max_stored_energy,
+                   stored[1:] == stored[:-1] + plant.eta_pump * pump * dt - (gen / plant.eta_gen) * dt,
+                   stored[0] == stored[n]]
+    for qk in np.linspace(-P, P, knots):          # w >= every lower tangent of q^2 at knot qk
+        constraints.append(w >= 2 * qk * net - qk**2)
+    # A vanishing $0.0001/MWh charge on both legs breaks the pump-and-generate-at-once tie
+    # that impact pricing can otherwise create at negative prices; economically it is nil.
+    objective = (cp.sum(cp.multiply(prices, net) * dt) - beta * cp.sum(w) * dt
+                 - plant.var_om_per_mwh * cp.sum(gen * dt) - 1e-4 * cp.sum(pump + gen) * dt)
+    problem = cp.Problem(cp.Maximize(objective), constraints)
+    problem.solve(solver=cp.HIGHS)
+    g, u = gen.value, pump.value
+    q = g - u
+    realised = float((prices * q * dt - beta * q**2 * dt - plant.var_om_per_mwh * g * dt).sum())
+    upper = float(problem.value + 1e-4 * (u + g).sum() * dt)     # bound without the tie-break charge
+    assert problem.status == "optimal", f"price-impact LP ended {problem.status}"
+    assert float(np.minimum(u, g).max()) < 0.5, "simultaneous pump and generate in the impact solve"
+    assert (upper - realised) / realised < 0.005, "PWL bracket looser than 0.5%; raise the knot count"
+    return {"profit": realised, "gen": g, "pump": u, "sold_gwh": g.sum() * dt / 1e3}
+
+# Sweep the slope band on the held-out year, and price the UNADAPTED price-taker schedule
+# under the same impact for comparison (what an operator who ignored its footprint would earn).
+p25 = prices_by_year[2025].to_numpy()
+base25 = ceiling_by_year[2025]
+betas = [0.0025, 0.005, 0.01, 0.02]              # $/MWh per MW of net injection
+impact_rows = []
+for beta in betas:
+    adapted = solve_with_price_impact(p25, snowy, beta)
+    q0 = base25["gen"] - base25["pump"]          # the price-taker's schedule, unchanged
+    naive = float((p25 * q0 - beta * q0**2 - snowy.var_om_per_mwh * base25["gen"]).sum() * snowy.interval_hr)
+    assert adapted["profit"] >= naive - 1e-6, "re-optimising under impact cannot do worse"
+    impact_rows.append({
+        "Slope ($/MWh per 1,000 MW)": f"{beta * 1e3:g}",
+        "Price move at full power ($/MWh)": f"{beta * snowy.power_mw:.1f}",
+        "Re-optimised profit ($bn)": round(adapted["profit"] / 1e9, 2),
+        "Erosion vs ceiling": f"{(1 - adapted['profit'] / base25['profit']) * 100:.0f}%",
+        "Unadapted schedule ($bn)": round(naive / 1e9, 2),
+        "Energy sold (GWh)": round(adapted["sold_gwh"], 0)})
+impact_2025 = pd.DataFrame(impact_rows).set_index("Slope ($/MWh per 1,000 MW)")
+impact_profits = [r["Re-optimised profit ($bn)"] for r in impact_rows]
+assert all(a > b for a, b in zip(impact_profits, impact_profits[1:])), \
+    "profit should fall monotonically in the impact slope"
+display(impact_2025)
+```
+
+Read the figure left to right: each bar assumes the plant's trading moves the price a little more. The grey bar is what the plant still earns after **re-planning** its whole year around that self-inflicted price move; the faint red block above it, up to the dashed line, is what the price-taker headline over-stated; the short dark dash inside each bar is a **naive** operator who executes the price-taker plan regardless.
+
+```{python}
+#| code-summary: "Plot how much of the 2025 profit survives each impact scenario"
+# One bar per impact scenario. Grey = profit after re-optimising around the plant's own
+# footprint; faint red block = the bite out of the price-taker headline (dashed line); the
+# dark dash = the naive operator (price-taker schedule executed unchanged), so the gap from
+# dash to bar top is what re-planning recovers.
+ceiling_bn = base25["profit"] / 1e9
+labels = ["No impact\n(price taker)"] + [f"${b * snowy.power_mw:g}/MWh" for b in betas]
+adapted_bn = [ceiling_bn] + [r["Re-optimised profit ($bn)"] for r in impact_rows]
+naive_bn = [r["Unadapted schedule ($bn)"] for r in impact_rows]
+
+fig, ax = plt.subplots(figsize=(9, 4.5))
+xs = np.arange(len(labels))
+ax.bar(xs, adapted_bn, width=0.62, color=MUTED, alpha=0.9, edgecolor=INK, linewidth=1.1)
+ax.bar(xs[1:], [ceiling_bn - a for a in adapted_bn[1:]], bottom=adapted_bn[1:], width=0.62,
+       color=SPIKE, alpha=0.15, edgecolor=SPIKE, linewidth=0.8, linestyle=":")
+ax.axhline(ceiling_bn, color=INK, lw=1.2, ls="--")
+ax.plot(xs[1:], naive_bn, ls="none", marker="_", ms=24, mew=2.6, color=INK)
+for x, a in zip(xs[1:], adapted_bn[1:]):                       # the erosion, above each bar
+    ax.annotate(f"-{(1 - a / ceiling_bn) * 100:.0f}%", (x, ceiling_bn), xytext=(0, 7),
+                textcoords="offset points", ha="center", color=SPIKE, fontsize=10.5, fontweight="bold")
+ax.set_xticks(xs)
+ax.set_xticklabels(labels, fontsize=9)
+ax.set(title="How Much of the 2025 Profit Survives the Plant's Own Price Impact?",
+       xlabel="Assumed price move when the plant trades at full power (2,200 MW)",
+       ylabel="Annual profit ($bn)", ylim=(0, ceiling_bn * 1.16))
+ax.yaxis.set_major_formatter(lambda x, _: f"${x:,.1f}")
+ax.legend(handles=[Patch(color=MUTED, alpha=0.9, label="Earned after re-planning"),
+                   Patch(facecolor=SPIKE, alpha=0.15, edgecolor=SPIKE, ls=":", label="Lost to own price impact"),
+                   plt.Line2D([], [], ls="--", lw=1.2, color=INK, label="Price-taker headline"),
+                   plt.Line2D([], [], ls="none", marker="_", ms=14, mew=2.6, color=INK,
+                              label="Naive: not re-planned")],
+          frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.22), ncol=2, fontsize=8.5)
+finish(fig, "13-price-impact.png")
+```
+
+```{python}
+#| code-summary: "State the price-impact reading"
+_ero_lo = (1 - impact_rows[0]["Re-optimised profit ($bn)"] * 1e9 / base25["profit"]) * 100
+_ero_hi = (1 - impact_rows[-1]["Re-optimised profit ($bn)"] * 1e9 / base25["profit"]) * 100
+display(Markdown(
+    f"Across the band, the ceiling's 2025 profit falls by **{_ero_lo:.0f}% to {_ero_hi:.0f}%**, "
+    f"and even the smallest slope costs several times more than perfect foresight was worth that "
+    f"year. Three readings. First, the direction and rough size of the A1 bias is now quantified: "
+    f"headline profits in this report are over-statements by an amount that plausibly starts near "
+    f"a tenth and could exceed a third. Second, re-optimisation matters: an operator who re-plans "
+    f"around its own footprint trades less, trades wider, and keeps materially more than one who "
+    f"executes the price-taker plan regardless. Third, the same haircut applies in spirit to the "
+    f"forecaster, whose dispatch is also predominantly full-power: a cash-flow model consuming "
+    f"this report's implied prices should stress the margin per megawatt-hour sold by the same "
+    f"fractions. An exact forecaster correction needs partial-power actions in its rule and is "
+    f"future work, as is estimating the slope itself from bid-stack data."))
+```
+
 ### Results store
 
-Every render writes the backtest's outputs to `python/results/`, so simple questions can be answered without re-running the model: the half-hourly dispatch of all three schemes as one tidy table (`dispatch.parquet`), the annual summary (`summary.csv`), the frozen parameters (`parameters.csv`), and an Excel workbook of the small tables (`results.xlsx`). The companion script `workbench.py` loads the store for quick queries; the summary numbers are recomputed from the dispatch table itself and checked against the schemes' reported profits before anything is written.
+Every render writes the backtest's outputs to `python/results/`, so simple questions can be answered without re-running the model: the half-hourly dispatch of all three schemes as one tidy table (`dispatch.parquet`), the annual summary (`summary.csv`), the financial-modelling table below (`fin_inputs.csv`), the frozen parameters (`parameters.csv`), and an Excel workbook of the small tables (`results.xlsx`). The companion script `workbench.py` loads the store for quick queries; the summary numbers are recomputed from the dispatch table itself and checked against the schemes' reported profits before anything is written.
 
 ```{python}
 #| code-summary: "Write the results store: dispatch paths, annual summary, parameters, and the Excel workbook"
@@ -1507,11 +2265,42 @@ parameters = pd.DataFrame([
     ("train_years", "2022 2023 2024", "S2 and S3 training window; 2025 held out"),
 ], columns=["parameter", "value", "note"])
 
+# Step 3b. The financial-modelling table: the summary statistics plus the volume-weighted
+# spread of the prices each scheme actually traded at. The percentiles weight each half-hour's
+# price by the energy moved in it, so they describe the dollars, not the clock.
+def _wq(values, weights, qs):
+    '''Volume-weighted quantiles: the price below which the given share of energy traded.'''
+    order = np.argsort(values)
+    v, w = values[order], weights[order]
+    cum = np.cumsum(w) - 0.5 * w                    # midpoint convention
+    return np.interp(np.asarray(qs) * w.sum(), cum, v)
+
+_fin_rows = []
+for (_year, _scheme), _d in dispatch.groupby(["year", "scheme"]):
+    _px, _pump, _gen = (_d[c].to_numpy() for c in ("price_per_mwh", "pump_mw", "gen_mw"))
+    _b10, _b50, _b90 = _wq(_px, _pump, [0.1, 0.5, 0.9])
+    _s10, _s50, _s90 = _wq(_px, _gen,  [0.1, 0.5, 0.9])
+    _srow = summary.set_index(["year", "scheme"]).loc[(_year, _scheme)]
+    _fin_rows.append({
+        "year": _year, "scheme": _scheme,
+        "energy_sold_gwh": round(_srow["energy_sold_gwh"], 1),
+        "capacity_factor": round(_srow["capacity_factor"], 4),
+        "buy_p10": round(_b10, 2), "buy_mean": round(_srow["mean_buy_per_mwh"], 2),
+        "buy_p50": round(_b50, 2), "buy_p90": round(_b90, 2),
+        "sell_p10": round(_s10, 2), "sell_mean": round(_srow["mean_sell_per_mwh"], 2),
+        "sell_p50": round(_s50, 2), "sell_p90": round(_s90, 2),
+        "margin_per_mwh_sold": round(_srow["mean_sell_per_mwh"]
+                                     - _srow["mean_buy_per_mwh"] / (snowy.eta_pump * snowy.eta_gen)
+                                     - snowy.var_om_per_mwh, 2),
+        "gross_profit_bn": round(_srow["profit_bn"], 3)})
+fin_inputs = pd.DataFrame(_fin_rows)
+
 # Step 4. Write everything: parquet for the big table, CSV for the small ones, and one Excel
-# workbook (summary, monthly profit, parameters) for spreadsheet users.
+# workbook (summary, monthly profit, financial-model inputs, parameters) for spreadsheet users.
 dispatch.to_parquet(RESULTS_DIR / "dispatch.parquet", index=False)
 summary.to_csv(RESULTS_DIR / "summary.csv", index=False)
 parameters.to_csv(RESULTS_DIR / "parameters.csv", index=False)
+fin_inputs.to_csv(RESULTS_DIR / "fin_inputs.csv", index=False)
 monthly = (dispatch.assign(month=dispatch["interval_start"].dt.to_period("M").astype(str))
            .groupby(["scheme", "month"], as_index=False)["profit_dollars"].sum()
            .assign(profit_m=lambda d: d["profit_dollars"] / 1e6)
@@ -1519,9 +2308,263 @@ monthly = (dispatch.assign(month=dispatch["interval_start"].dt.to_period("M").as
 with pd.ExcelWriter(RESULTS_DIR / "results.xlsx", engine="openpyxl") as _xl:
     summary.round(4).to_excel(_xl, sheet_name="Summary", index=False)
     monthly.to_excel(_xl, sheet_name="Monthly profit ($m)")
+    fin_inputs.to_excel(_xl, sheet_name="Financial model inputs", index=False)
     parameters.to_excel(_xl, sheet_name="Parameters", index=False)
 print(f"Results store written to {RESULTS_DIR}/: dispatch.parquet "
-      f"({len(dispatch):,} rows), summary.csv, parameters.csv, results.xlsx")
+      f"({len(dispatch):,} rows), summary.csv, fin_inputs.csv, parameters.csv, results.xlsx")
+```
+
+### Annual results for financial modelling
+
+Any project cash-flow model consumes a year of dispatch through a handful of numbers: how much energy was sold, at what average prices each leg traded (pumping = buying, generating = selling), and how hard the plant ran. The table gives those numbers for every scheme and year, plus the volume-weighted spread of the realised prices (the price below which 10%, 50% and 90% of each leg's energy traded). The averages are the point inputs; the percentile columns are what a point input hides, and they are the honest way to parameterise a sensitivity or risk analysis rather than guessing symmetric bands. The margin column nets the buy leg up by the round-trip loss and subtracts variable operating cost, so margin times energy sold reproduces each year's gross profit.
+
+```{python}
+#| code-summary: "Show the financial-modelling table (also written to the results store)"
+_display_names = {"S1 perfect foresight": "Perfect foresight (S1)",
+                  "S2 rule of thumb": "Rule of thumb (S2)",
+                  "S3 forecaster": "Forecaster (S3)"}
+fin_view = (fin_inputs
+            .assign(scheme=[_display_names[s] + ("*" if y == 2025 and s != "S1 perfect foresight" else "")
+                            for s, y in zip(fin_inputs["scheme"], fin_inputs["year"])])
+            .set_index(["year", "scheme"]).rename_axis(["Year", "Scheme"]))
+fin_view.columns = pd.MultiIndex.from_tuples([
+    ("Energy", "sold GWh"), ("Energy", "capacity factor"),
+    ("Buy $/MWh", "P10"), ("Buy $/MWh", "mean"), ("Buy $/MWh", "P50"), ("Buy $/MWh", "P90"),
+    ("Sell $/MWh", "P10"), ("Sell $/MWh", "mean"), ("Sell $/MWh", "P50"), ("Sell $/MWh", "P90"),
+    ("Result", "margin $/MWh sold"), ("Result", "gross profit $bn")])
+(fin_view.style
+ .format({("Energy", "sold GWh"): "{:,.0f}", ("Energy", "capacity factor"): "{:.0%}",
+          ("Buy $/MWh", "P10"): "{:,.0f}", ("Buy $/MWh", "mean"): "{:,.0f}",
+          ("Buy $/MWh", "P50"): "{:,.0f}", ("Buy $/MWh", "P90"): "{:,.0f}",
+          ("Sell $/MWh", "P10"): "{:,.0f}", ("Sell $/MWh", "mean"): "{:,.0f}",
+          ("Sell $/MWh", "P50"): "{:,.0f}", ("Sell $/MWh", "P90"): "{:,.0f}",
+          ("Result", "margin $/MWh sold"): "{:,.0f}", ("Result", "gross profit $bn"): "{:.2f}"})
+ # centre the merged Year cells vertically and horizontally so each year reads as one block
+ .set_table_styles([
+     {"selector": "th.row_heading.level0", "props": [("vertical-align", "middle"), ("text-align", "center")]},
+     {"selector": "th.row_heading.level1", "props": [("text-align", "left")]},
+     {"selector": "th.col_heading", "props": [("text-align", "center")]},
+     {"selector": "td", "props": [("text-align", "right")]}]))
+```
+
+\* Out of sample: rule fixed on 2022 to 2024 before trading 2025.
+
+The same information as a picture, for the deployable forecaster: the bar is the P10 to P90 band of the prices its energy actually traded at, the tick is the volume-weighted mean. The two legs live in different parts of the price distribution, which is the entire business, and the generate band is wide because a large share of the revenue rides on a small number of expensive hours. Note 2024: a few extreme half-hours carried so much of the sold volume that the mean sits *above* the P90 of the band. That is not an error; it is what spike-driven revenue looks like, and it is why the mean and the median tell different stories in a spike year.
+
+```{python}
+#| code-summary: "Plot the realised price bands behind the forecaster's averages"
+# P10-P90 volume-weighted bands per year for the forecaster's two legs, mean marked.
+# BUY and SELL keep their fixed meanings (blue = pumping/buying, orange = generating/selling).
+s3fin = fin_inputs[fin_inputs["scheme"] == "S3 forecaster"].set_index("year")
+fig, ax = plt.subplots(figsize=(9, 4.4))
+for i, year in enumerate(YEARS):
+    r = s3fin.loc[year]
+    for leg, colour, off in (("buy", BUY, -0.16), ("sell", SELL, +0.16)):
+        ax.plot([r[f"{leg}_p10"], r[f"{leg}_p90"]], [i + off, i + off],
+                color=colour, lw=7, solid_capstyle="butt", alpha=0.45, zorder=1)
+        ax.plot(r[f"{leg}_mean"], i + off, marker="|", color=colour, ms=16, mew=3, zorder=2)
+ax.set_yticks(range(len(YEARS)))
+ax.set_yticklabels([f"{y}*" if y not in TRAIN_YEARS else str(y) for y in YEARS])
+ax.invert_yaxis()
+ax.set(title="Trading Prices", xlabel="Realised price ($/MWh)")
+ax.xaxis.set_major_formatter(dollars)
+ax.set_xlim(right=395)                                        # room for the 2024 annotation
+# 2024's mean sits above its own P90: a handful of extreme half-hours carry that much volume
+r24 = s3fin.loc[2024]
+ax.annotate("2024: spike half-hours pull the\nmean above the band's P90",
+            xy=(r24["sell_mean"], 2 + 0.16), xytext=(r24["sell_mean"] + 18, 1.05),
+            color=INK2, fontsize=8.5, arrowprops=dict(arrowstyle="->", color=MUTED))
+ax.legend(handles=[plt.Line2D([], [], color=BUY, lw=7, alpha=0.45, label="Pump price, P10 to P90 of volume"),
+                   plt.Line2D([], [], color=SELL, lw=7, alpha=0.45, label="Generate price, P10 to P90 of volume"),
+                   plt.Line2D([], [], marker="|", color=INK2, ls="none", ms=12, mew=3, label="Volume-weighted mean")],
+          frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.16), ncol=3, fontsize=8.5)
+fig.text(0.985, 0.9, "* out of sample", ha="right", fontsize=8, color=INK2, style="italic")
+finish(fig, "11-financial-price-bands.png")
+```
+
+Finally, every scheme-year on one plane. A cash-flow model that takes a buy price, a sell price and a capacity factor can land anywhere on this chart; the twelve points are where four years of real prices actually put the three schemes. The dashed lines are constant gross margin per MWh sold (sell price minus the loss-adjusted buy price minus variable cost), so a point's line tells you what each sold megawatt-hour cleared before fixed costs.
+
+```{python}
+#| code-summary: "Plot every scheme-year in the buy price x sell price plane"
+RESULT = "#7b52ab"                          # the forecaster keeps its purple from the comparison chart
+eta_rt = snowy.eta_pump * snowy.eta_gen
+fig, ax = plt.subplots(figsize=(9, 5.2))
+bx = np.linspace(0, 115, 2)
+for m in (50, 100, 150, 200, 250):          # iso-margin lines: sell = margin + buy/eta + var O&M
+    ax.plot(bx, m + bx / eta_rt + snowy.var_om_per_mwh, ls="--", color=GRID, lw=1.2, zorder=1)
+    ax.annotate(f"${m}/MWh margin", (1.5, m + 1.5 / eta_rt + snowy.var_om_per_mwh),
+                color=MUTED, fontsize=8.5, ha="left", va="bottom")
+_marks = {"S1 perfect foresight": dict(marker="o", mfc="white", mec=INK, mew=1.8, ms=9, color=INK),
+          "S2 rule of thumb":     dict(marker="s", color=MUTED, ms=8),
+          "S3 forecaster":        dict(marker="o", color=RESULT, ms=9)}
+# default label offset, with hand nudges for the crowded lower-left cluster
+_nudges = {("S1 perfect foresight", 2025): (-36, -3), ("S2 rule of thumb", 2022): (-10, -14)}
+for scheme, mk in _marks.items():
+    d = fin_inputs[fin_inputs["scheme"] == scheme]
+    ax.plot(d["buy_mean"], d["sell_mean"], ls="none", zorder=3, **mk)
+    for _, r in d.iterrows():
+        held_out = r["year"] == 2025 and scheme != "S1 perfect foresight"
+        ax.annotate(f"{int(r['year'])}{'*' if held_out else ''}", (r["buy_mean"], r["sell_mean"]),
+                    xytext=_nudges.get((scheme, r["year"]), (7, 5)),
+                    textcoords="offset points", fontsize=8, color=INK2)
+ax.set(title="Every Scheme-Year as a Buy Price and a Sell Price",
+       xlabel="Volume-weighted mean buy (pump) price ($/MWh)",
+       ylabel="Volume-weighted mean sell (generate) price ($/MWh)", xlim=(0, 115),
+       ylim=(40, fin_inputs["sell_mean"].max() + 35))
+ax.xaxis.set_major_formatter(dollars)
+ax.yaxis.set_major_formatter(dollars)
+ax.legend(handles=[plt.Line2D([], [], ls="none", label=_display_names[s], **mk)
+                   for s, mk in _marks.items()], frameon=False, loc="lower right")
+fig.text(0.985, 0.02, "* out of sample: rule fixed on 2022 to 2024", ha="right",
+         fontsize=8, color=INK2, style="italic")
+finish(fig, "12-buy-sell-plane.png")
+```
+
+### A simulation-grounded risk pass
+
+The backtest compresses each year of dispatch into three numbers. A project decision needs those numbers pushed through a cash-flow model, against capital cost, operating cost, tax, depreciation and a discount rate, and it needs the risk question asked properly: not "what is the NPV of the base case?" but "what does the NPV *distribution* look like across everything the backtest saw?" This section does both, in the open, with every parameter stated.
+
+**The cash-flow model** is a standard single-asset DCF, in real dollars throughout. The plant builds for nine years (20% of the capital in year 1, 10% in each of the next eight) and then operates every year of a 150-year design life: generation equals capacity factor × 2,200 MW × 8,760 hours; revenue is the sell price on that generation; costs are variable O&M at \$4/MWh, fixed O&M at 1% of the capital cost per year, and the pumping energy bought at the buy price, grossed up by the 77% round trip. Depreciation is straight-line over 40 years, company tax is 30%, and free cash flow is discounted at a real, after-tax WACC. The capital cost is Snowy 2.0's official \$12 billion. The long horizon flatters the project less than it seems: cutting it to 60 years lowers the 3% NPV by about a third and leaves the 7% verdict unchanged.
+
+```{python}
+#| code-summary: "Replicate the cash-flow model and verify its base case"
+# A standard single-asset DCF, small enough to state completely. All dollars are real; the
+# discount rate is a real, after-tax WACC. Everything the model uses is set right here.
+POWER_MW, HOURS_YR = snowy.power_mw, 8760.0
+VAR_OM, TAX, FIXED_FRAC = snowy.var_om_per_mwh, 0.30, 0.01
+BUILD_SHARE = np.array([0.20] + [0.10] * 8)                  # nine construction years
+LIFE_YEARS, DEPN_YEARS = 150, 40
+_years = np.arange(1, LIFE_YEARS + 1)
+_operating = _years >= 10                                    # operations start in year 10
+_depreciating = _operating & (_years - 9 <= DEPN_YEARS)      # 40 years of straight-line depreciation
+
+def project_npv(buy, sell, cf, capex, wacc, rte=0.77, fcas=0.0):
+    '''NPV of the plant as a project: build for nine years, then operate every year at the
+    given buy and sell prices and capacity factor. Returns the NPV in dollars.'''
+    gen_mwh = cf * POWER_MW * HOURS_YR                       # energy sold per operating year
+    ebitda = sell * gen_mwh + fcas - (VAR_OM * gen_mwh       # revenue less variable O&M,
+                                      + FIXED_FRAC * capex   # fixed O&M (1% of capex a year),
+                                      + buy * gen_mwh / rte) # and pumping energy, grossed up for losses
+    depn = np.where(_depreciating, capex / DEPN_YEARS, 0.0)
+    fcf = np.where(_operating, (ebitda - depn) * (1 - TAX) + depn, 0.0)
+    fcf[:9] = -capex * BUILD_SHARE                           # the build years pay out the capital
+    return (fcf / (1 + wacc) ** (_years - 1)).sum()
+
+BASE = dict(buy=s3fin.loc[2025, "buy_mean"], sell=s3fin.loc[2025, "sell_mean"],
+            cf=s3fin.loc[2025, "capacity_factor"], capex=12e9)
+npv3, npv7 = project_npv(**BASE, wacc=0.03), project_npv(**BASE, wacc=0.07)
+lo, hi = 0.0, 0.20                                           # IRR by bisection (NPV falls as the rate rises)
+for _ in range(60):
+    mid = (lo + hi) / 2
+    lo, hi = (mid, hi) if project_npv(**BASE, wacc=mid) > 0 else (lo, mid)
+irr = lo
+
+def breakeven_sell(wacc):
+    '''The sell price at which NPV = 0. NPV is linear in the sell price, so one step suffices.'''
+    annuity = (1 / (1 + wacc) ** (_years[_operating] - 1)).sum()
+    gen_mwh = BASE["cf"] * POWER_MW * HOURS_YR
+    return BASE["sell"] - project_npv(**BASE, wacc=wacc) / (gen_mwh * (1 - TAX) * annuity)
+
+be3, be7 = breakeven_sell(0.03), breakeven_sell(0.07)
+# the highest sell price achieved at a comparable utilisation, across every scheme and year
+best_at_volume = fin_inputs.loc[fin_inputs["capacity_factor"] >= 0.25, "sell_mean"].max()
+assert abs(npv3 - 7.56e9) < 5e7 and abs(npv7 + 3.49e9) < 5e7, "the cash-flow model lost its anchors"
+assert 0.048 < irr < 0.049, "the IRR moved off its anchor"
+display(Markdown(
+    f"Fed the forecaster's held-out 2025 numbers (buy **\\${BASE['buy']:.2f}/MWh**, sell "
+    f"**\\${BASE['sell']:.2f}/MWh**, capacity factor **{BASE['cf']:.1%}**) at the official \\$12 bn "
+    f"capital cost, the project returns **{irr*100:.2f}% real after tax**: NPV "
+    f"**{npv3/1e9:+.2f} bn at a 3% real WACC**, **{npv7/1e9:+.2f} bn at 7%**. The break-even sell "
+    f"price is **\\${be3:.0f}/MWh at 3%** and **\\${be7:.0f}/MWh at 7%**. For scale: across every "
+    f"scheme and year in the backtest, the highest volume-weighted sell price achieved at a "
+    f"comparable capacity factor is **\\${best_at_volume:.0f}/MWh**, so the 7% hurdle sits above "
+    f"anything four years of real prices ever paid a full-scale operator."
+))
+```
+
+**The distributions come from the backtest, not from guesses.** Three rules govern the Monte Carlo:
+
+1. **Prices and utilisation are drawn as whole years.** One draw picks one of the forecaster's four backtested years and takes its buy price, sell price and capacity factor *together*. This preserves the co-movement the backtest actually found: cheap-pumping years are high-cycling years (the two are perfectly rank-correlated across our four years), while the sell price moves roughly independently of both. Drawing each input separately would invent physically incoherent years, such as crisis-year prices at boom-year utilisation. It also refuses to invent a distribution shape: with four observed years, the honest distribution *is* those four years, equally weighted.
+2. **Engineering and cost inputs get Pert distributions.** Round-trip efficiency: Pert(0.67, 0.77, 0.80), the published figure as the mode, tunnel-friction pessimism below, best-case operation above. Capital cost: Pert(\$12 bn, \$15 bn, \$22 bn): the official estimate as the floor (it is already contracted spend), a mode above it because this project has already moved from \$2 bn announced through \$5.9 bn at approval to \$12 bn, and a tail acknowledging that large hydro overruns of this scale are historically common.
+3. **The WACC is deliberately not drawn.** The discount rate is the price of risk, not a project risk: mixing it into the same Monte Carlo muddles "how uncertain are the cash flows?" with "what should uncertain cash flows cost?", and produces a distribution no one can interpret. The whole simulation is priced twice instead, at 3% and at 7% real.
+
+```{python}
+#| code-summary: "Draw ten thousand futures from the backtest and price each twice"
+# The recipe above, executed: a year-draw for (buy, sell, capacity factor), independent Perts
+# for round-trip efficiency and capital cost, and the whole distribution priced at two WACCs.
+rng = np.random.default_rng(20260716)
+N_DRAWS = 10_000
+s3_triplets = (fin_inputs.query("scheme == 'S3 forecaster'")
+               [["buy_mean", "sell_mean", "capacity_factor"]].to_numpy())
+year_pick = rng.integers(0, len(s3_triplets), N_DRAWS)       # rows are 2022, 2023, 2024, 2025
+buy_d, sell_d, cf_d = s3_triplets[year_pick].T
+
+def pert(a, m, b, size):
+    '''A Pert draw: smooth, bounded on [a, b], weighted toward the mode m.'''
+    alpha, beta = 1 + 4 * (m - a) / (b - a), 1 + 4 * (b - m) / (b - a)
+    return a + rng.beta(alpha, beta, size) * (b - a)
+
+rte_d = pert(0.67, 0.77, 0.80, N_DRAWS)
+capex_d = pert(12e9, 15e9, 22e9, N_DRAWS)
+
+gen_d = cf_d * POWER_MW * HOURS_YR
+ebitda_d = sell_d * gen_d - (VAR_OM * gen_d + FIXED_FRAC * capex_d + buy_d * gen_d / rte_d)
+depn_d = capex_d / DEPN_YEARS
+npv_by_wacc = {}
+for wacc in (0.03, 0.07):
+    disc = 1 / (1 + wacc) ** (_years - 1)
+    pv_build = (BUILD_SHARE * disc[:9]).sum()
+    a_depn = disc[_depreciating].sum()                       # operating years still depreciating
+    a_post = disc[_operating & ~_depreciating].sum()         # operating years after depreciation ends
+    npv_by_wacc[wacc] = (-capex_d * pv_build
+                         + ((ebitda_d - depn_d) * (1 - TAX) + depn_d) * a_depn
+                         + ebitda_d * (1 - TAX) * a_post)
+
+RESULT = "#7b52ab"                                           # purple: the forecaster-based result
+fig, ax = plt.subplots(figsize=(9, 4.4))
+bins = np.linspace(min(v.min() for v in npv_by_wacc.values()) / 1e9,
+                   max(v.max() for v in npv_by_wacc.values()) / 1e9, 70)
+for wacc, colour, label in ((0.03, RESULT, "Discounted at 3% real"),
+                            (0.07, MUTED, "Discounted at 7% real")):
+    ax.hist(npv_by_wacc[wacc] / 1e9, bins=bins, color=colour, alpha=0.55, label=label)
+ax.axvline(0, color=INK, lw=1.4, ls="--")
+ax.annotate("NPV = 0", (0, ax.get_ylim()[1] * 0.97), xytext=(5, -6), textcoords="offset points",
+            color=INK2, fontsize=8.5)
+ax.set(title="Ten Thousand Futures, Priced Twice",
+       xlabel="Project NPV ($bn)", ylabel=f"Draws (of {N_DRAWS:,})")
+ax.xaxis.set_major_formatter(lambda x, _: f"${x:,.0f}")
+ax.legend(frameon=False, loc="upper left")
+finish(fig, "12b-npv-distribution.png")
+```
+
+```{python}
+#| code-summary: "Read the two distributions"
+q = {w: np.percentile(v, [5, 50, 95]) / 1e9 for w, v in npv_by_wacc.items()}
+pos = {w: (v > 0).mean() for w, v in npv_by_wacc.items()}
+assert pos[0.07] < 0.01, "the 7% verdict is supposed to be decisive"
+# One robustness stat: the same draws with the 2022 crisis year excluded from the pool.
+calm = year_pick != 0                                        # triplet row 0 is 2022
+med_calm = np.percentile(npv_by_wacc[0.03][calm], 50) / 1e9
+pos_calm = (npv_by_wacc[0.03][calm] > 0).mean()
+annuity7 = (1 / 1.07 ** (_years[_operating] - 1)).sum()
+fcas_needed = -npv7 / ((1 - TAX) * annuity7)                 # flat extra revenue closing the 7% gap
+seven_word = "not one" if pos[0.07] == 0 else f"only {pos[0.07]:.1%}"
+display(Markdown(
+    f"At **7% real**, the verdict is not just negative at the base case: **{seven_word} of "
+    f"{N_DRAWS:,} draws comes out positive** (P5 {q[0.07][0]:+.1f}, median {q[0.07][1]:+.1f}, "
+    f"P95 {q[0.07][2]:+.1f} \\$bn). No plausible side revenue changes that: closing the base-case "
+    f"gap would take about **\\${fcas_needed/1e6:,.0f}M of extra revenue every operating year**, "
+    f"roughly twice the size of the entire NEM frequency-control (FCAS) market in a typical "
+    f"recent year. At **3% real** the project is close to a coin flip: **{pos[0.03]:.0%} of draws "
+    f"are positive** (P5 {q[0.03][0]:+.1f}, median {q[0.03][1]:+.1f}, P95 {q[0.03][2]:+.1f} \\$bn), "
+    f"and the coin is weighted by the two inputs the operator does not control: whether the "
+    f"capital cost holds near \\$12 bn, and whether future years look like 2025 or like the 2022 "
+    f"crisis (excluding 2022 from the draw pool lifts the 3% median to {med_calm:+.1f} \\$bn and "
+    f"the positive share to {pos_calm:.0%}). The conclusion to carry forward: **the discount rate "
+    f"and the capital cost decide this project; the operating strategy defends it.** A spreadsheet "
+    f"Monte Carlo built on this same recipe should reproduce these percentiles to within sampling "
+    f"noise; treat any material disagreement as a bug, not a difference of opinion."
+))
 ```
 
 ### Data notes
