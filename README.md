@@ -65,7 +65,7 @@ raised assertion aborts the render. To work cell by cell instead, open
 | `snowy-arbitrage-demo.html` | Server-free interactive demo of the threshold scheme (vanilla JS, opens in any browser). |
 | `requirements.txt` | Pinned dependencies for the venv, Colab, and Binder. The repo-root `binder/requirements.txt` simply includes this file, since Binder does not look inside `python/`. |
 | `data/nsw1_prices_*_30min.parquet` | Committed price snapshots, one per year. **This is why the notebook reproduces exact numbers offline.** Public AEMO data, tidied to 30-minute steps. Delete a snapshot to force a fresh download from AEMO (via the open-source NEMOSIS package). |
-| `figures/*.png` | Every figure, saved on each run, ready for presentation slides. |
+| `figures/*.png` | Every figure, saved on each run, ready for reuse elsewhere. |
 | `results/` | **The model's outputs, written by every render**: the half-hourly dispatch of all three schemes (`dispatch.parquet`), the annual `summary.csv`, the frozen `parameters.csv`, and `results.xlsx` for spreadsheet users. The summary is recomputed from the dispatch table and checked against the report's own numbers before it is written. |
 | `workbench.py` | Quick-question scratchpad. Loads `data/` and `results/` instantly (no solving), answers ad-hoc questions in a few lines, and its `export()` helper drops any table into `exports/` as CSV or xlsx for Excel. Open it in VS Code and run cells (`# %%`), or run it as a plain script. |
 
@@ -76,9 +76,9 @@ in one step. Every change therefore starts and ends in the `.qmd`.
 
 **1. Review.** Read `snowy-arbitrage.html` for the reader experience (folded code,
 collapsed notes, hover definitions) and the `.qmd` for code and prose. Things to
-hunt: contractions, em dashes, any mention of the Excel model outside the one collapsed
-note, numbers presented as the headline rather than as support, stale figures after a
-methods change.
+hunt: contractions, em dashes, any reference to group coursework or a companion Excel
+model (the report is standalone; there should be none), numbers presented as the headline
+rather than as support, stale figures after a methods change.
 
 **2. Edit** the `.qmd` in any text editor. Prose is plain markdown; code lives in
 ` ```{python} ` blocks. The document is fully self-contained: every function the report
@@ -94,8 +94,7 @@ quarto render snowy-arbitrage.qmd --to html
 This executes every cell fresh through the `snowy-arbitrage` kernel (pinned in the YAML
 header), so a successful render proves the whole analysis ran; any raised assertion
 aborts it. Benign stderr noise (numpy overflow warnings from cvxpy scaling) is suppressed
-by `warning: false` in the YAML header. (`strip_stderr.py` belonged to the old
-notebook-as-source pipeline and is no longer part of the workflow.)
+by `warning: false` in the YAML header.
 
 **4. Refresh the Colab copy** whenever the source changed:
 
@@ -117,10 +116,18 @@ change when a year is re-downloaded on purpose.
 [github.com/yobin-tim/snowy-arbitrage](https://github.com/yobin-tim/snowy-arbitrage): a
 public repository holding only this project (this README at its root, the report files,
 data snapshots, and figures under `python/`, plus `binder/requirements.txt`). The mirror
-is one-way and manual: after committing here, copy the changed files into a clone of the
-mirror and push. Nothing else from this private workspace ever goes into it. If a
+is one-way and manual: after committing here, run
+
+```bash
+./mirror-push.sh "Updated the report: <what changed>"
+```
+
+which copies the published file set into the permanent clone at
+`~/Documents/GitHub/snowy-arbitrage` (override with `MIRROR_CLONE=...`), shows the diff,
+commits, and pushes. Nothing else from this private workspace ever goes into it. If a
 collaborator edits the mirror directly (pull request or direct commit), fold that change
-back into this folder first, then re-render and push the mirror forward.
+back into this folder first, then re-render and push the mirror forward (the script's
+fast-forward-only pull refuses to run until you do).
 
 ## Collaborating on the report
 

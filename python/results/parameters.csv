@@ -1,6 +1,6 @@
 parameter,value,note
 power_mw,2200.0,"plant power rating, either direction"
-max_stored_energy_mwh,398862.0176087328,reservoir capacity (A4)
+max_stored_energy_mwh,398862.0176087328,reservoir capacity in stored potential-energy units; 350 GWh dischargeable (A4)
 round_trip_efficiency,0.77,"eta, split evenly across the legs"
 var_om_per_mwh,4.0,variable O&M charged on generation
 interval_hr,0.5,"length of one dispatch step, hours"
