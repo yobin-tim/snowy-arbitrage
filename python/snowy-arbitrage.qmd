@@ -607,6 +607,11 @@ The solver below is a direct transcription of the dispatch problem in The Model.
 def solve_perfect_foresight(prices: np.ndarray, plant: StoragePlant, cyclic: bool = True) -> dict:
     '''Best arbitrage schedule with every price known in advance (the ceiling). Returns total
     profit and the half-hourly pump / generate / stored-energy paths. Mirrors the equations above.'''
+    # The whole problem in one breath: choose pumping and generating levels for every
+    # half-hour of the year at once (17,520 decisions each way in a normal year) to
+    # maximise profit, subject to the four constraints from The Model. Every
+    # relationship is linear, so the solver finds the exact optimum, and the year's
+    # entire schedule comes back in about a second.
     n  = len(prices)
     dt = plant.interval_hr
     P  = plant.power_mw
@@ -830,6 +835,11 @@ def find_cyclic_boundary(run_year, plant, tol_dis_mwh=100.0,
     but not that the cyclic profit is unique; we therefore report whether every starting level
     settled to the same economic outcome (`unique_fixed_point`), so a non-unique fixed point
     cannot pass silently.'''
+    # The search in one breath: run the year from five different starting levels; after
+    # each run, feed the year's END level back in as the START and repeat until the two
+    # match. A level that maps to itself is a fixed point: a year that begins exactly as
+    # full as it ends. Trying five starts is the insurance: if they all settle to the
+    # same outcome, the fixed point is effectively unique; if not, the caller is told.
     eg = plant.eta_gen
     runs = []                                                       # one record per starting level
     for frac in start_fracs:
@@ -974,6 +984,8 @@ We give the operator exactly the knowledge in that water-value example, learned 
 
 Steps 1 and 2 are the operator's *beliefs*; steps 3 and 4 turn those beliefs into a *rule*. The paragraphs below expand each in turn.
 
+Everything after that is the *verdict*: the finished rule is frozen and sent to trade real years of prices, with the accounting convention under Performance deciding how the result is counted. The whole exercise is therefore a pipeline of three stages, each handing one object to the next. The fitting hands the solver a set of beliefs (the buckets and their transition odds); the solver hands the backtest a frozen rule (an action for every situation); the backtest hands the accounting a year of dispatch and cash. And the stages never reach into one another: the solver never sees a real price path, the backtest never optimises or learns, and the accounting never changes a single dispatch decision: it only fixes the start-of-year store level the run is counted from.
+
 **What the operator believes.** Prices are grouped into the 16 buckets above; from history we estimate, for every half hour of the day, the odds of moving from each bucket to each other bucket in the next half hour. This is a <abbr title="A model where the odds of what happens next depend only on the current situation, not the full history. Here: the odds of the next half-hour's price bucket, given the current bucket and the time of day.">Markov model</abbr> of the price: it knows the daily rhythm and how sticky prices are, but it never knows what will actually happen.
 
 ::: {.callout-note collapse="true"}
@@ -989,11 +1001,22 @@ Steps 1 and 2 are the operator's *beliefs*; steps 3 and 4 turn those beliefs int
 
 **How the best decisions are found.** The plant is a going concern: there is no last day, and the best rule for a Tuesday in March is the best rule for any day with the same price and store level. So we solve for a **stationary** rule: one map from time of day, price bucket and store level to an action, used every day, forever. The method is <abbr title="Solve the last decision first, then step backwards: each earlier decision is easy once you know the value of everything that can follow it.">backward induction</abbr> applied to a single day, repeatedly: sweep backwards through the day's 48 half-hours to value every situation, feed that valuation back in as the value of reaching tomorrow, and sweep again, until the *shape* of the valuation stops changing. (Its *level* keeps growing by one day's average profit each sweep, which is why only the shape can settle; a reference constant is subtracted each sweep to handle this, a standard method called relative value iteration.) Every earlier decision is then a comparison of "cash now" against the expected value of the energy later. The result attaches a dollar value to every stored megawatt-hour in every situation, which hydro traders call the <abbr title="The opportunity-cost value of water held in the reservoir: what a stored megawatt-hour is expected to earn if kept for later instead of sold now.">water value</abbr>. The optimal behaviour follows automatically: **generate when the price is above the water value, pump when it is below the water value minus the round-trip loss, and otherwise wait.**
 
+This is also why Scheme 3 needs different mathematics from Scheme 1. With the whole price path on the table, the unknown was a *schedule*, one number per half hour, and finding the best schedule was a linear program. With only a distribution to go on, no fixed schedule can be right: what the operator should do at 6 pm depends on the price and store level it actually arrives with. The unknown becomes a *rule*, an action for every situation, and solving for rules under uncertainty is exactly what the backward induction above delivers.
+
 ::: {.callout-note collapse="true"}
 #### The Bellman equation
 
 Let $V_t(s, k)$ be the expected future profit at slot $t$ of the day with store level $s$ and price bucket $k$. Backward induction repeatedly evaluates $$ V_t(s,k) \;=\; \max_{a \,\in\, \{\text{pump},\, \text{idle},\, \text{generate}\}}
-   \Big\{ r(a, s, k) \;+\; \mathbb{E}\big[\, V_{t+1}(s', k') \,\big|\, k \,\big] \Big\}, $$ where $r$ is the immediate cash flow of the action, $s'$ is the store level it leads to, and the expectation runs over the estimated odds of the next price bucket $k'$. The horizon is infinite: the plant has no final day, so the equation is solved to a fixed point rather than swept over a fixed number of days. The one-day update above is applied repeatedly, a reference constant is subtracted after each sweep (relative value iteration), and the iteration stops when the one-sweep change in $V$ is flat across all states to within \$100. The retained rule is then checked directly: solving on past the stopping point no longer moves its scored profit (the convergence evidence under Performance). The implementation is written out in full just below, folded by default.
+   \Big\{ r(a, s, k) \;+\; \mathbb{E}\big[\, V_{t+1}(s', k') \,\big|\, k \,\big] \Big\}, $$ where $r$ is the immediate cash flow of the action, $s'$ is the store level it leads to, and the expectation runs over the estimated odds of the next price bucket $k'$. The horizon is infinite: the plant has no final day, so the equation is solved to a fixed point rather than swept over a fixed number of days. The one-day update above is applied repeatedly, a reference constant is subtracted after each sweep (relative value iteration), and the iteration stops when the one-sweep change in $V$ is flat across all states to within \$100. The retained rule is then checked directly: solving on past the stopping point no longer moves its scored profit (the convergence evidence under Performance).
+
+In code, one sweep works through four moves:
+
+1. Start from the current start-of-day valuation as the continuation: the value, in each situation, of reaching tomorrow.
+2. Walk the day's 48 half-hours backwards. In every situation, price all three actions: the cash the action generates now (valued at the bucket's representative training price) plus the expected value of the situation it lands in, found by interpolating the valuation at the landing store level and averaging over where that slot's transition odds send the price next.
+3. Record the best action as this sweep's rule for that slot, and the best value as the new valuation surface.
+4. After the 48 slots, subtract the reference constant and measure how much the surface's shape moved; once the movement is flat to within \$100 across every situation, stop.
+
+Representative bucket prices appear only inside this solve; once the rule is scored, every dollar comes from realised market prices. The implementation is written out in full just below, folded by default.
 :::
 
 #### Specification choices
@@ -1009,7 +1032,7 @@ Let $V_t(s, k)$ be the expected future profit at slot $t$ of the day with store 
 
 The training years include the 2022 fuel crisis and two calmer years, so the learned pattern is neither all-crisis nor all-calm.
 
-The functions that do this work are the heart of the report's central estimate, so they are written out in full below (folded by default): a small `PriceModel` type that holds the operator's beliefs, then four functions. In order: `fit_price_model` learns those beliefs, `solve_known_distribution` turns them into the stationary decision rule by relative value iteration, `run_policy` scores the rule against **real prices**, and `cyclic_score` applies the repeated-year boundary convention explained under Performance. The third is the honesty guarantee of the whole exercise: the buckets only ever choose the *action*; every dollar is paid and earned at the realised market price.
+The functions that do this work are the heart of the report's central estimate, so they are written out in full below (folded by default): a small `PriceModel` type that holds the operator's beliefs, then four functions, one for each stage of the pipeline plus its accounting. `fit_price_model` learns the beliefs. `solve_known_distribution` turns them into the frozen stationary rule by relative value iteration. `run_policy` is the simulator: it walks the frozen rule through a real year, half hour by half hour, as a table lookup plus reservoir bookkeeping; every dollar is paid and earned at the **realised market price**, never at a bucket's representative price, and that is the honesty guarantee of the whole exercise, because the buckets only ever choose the *action*. `cyclic_score` is the accounting layer: it applies the repeated-year boundary convention explained under Performance.
 
 ```{python}
 #| code-summary: "Define the forecaster: the price model, the policy solver, and the scoring functions"
@@ -1048,8 +1071,9 @@ def fit_price_model(yearly_series: list, n_bins: int = 16, slots: int = 48) -> P
     observations into the wrong slot) or a plain 1-D array (positional slot numbering,
     valid only for gap-free data). NaN prices are rejected outright rather than silently
     binned.'''
-    # Prepare each series: values, each observation's slot of day, and which adjacent pairs
-    # are genuinely consecutive half-hours (a pair straddling a data gap is not a transition).
+    # Step 1. Prepare each training series: its values, each observation's half-hour slot of
+    # the day, and which adjacent pairs are genuinely consecutive (a pair straddling a data
+    # gap is not a transition and must not be counted as one).
     prepared = []
     for s in yearly_series:
         if isinstance(s, pd.Series) and isinstance(s.index, pd.DatetimeIndex):
@@ -1064,17 +1088,29 @@ def fit_price_model(yearly_series: list, n_bins: int = 16, slots: int = 48) -> P
             raise ValueError("price series contains NaNs; fill or drop them before fitting")
         prepared.append((values, slot, consecutive))
 
+    # Step 2. Cut the pooled training prices into equal-head-count buckets: the bucket
+    # edges are quantiles, so each bucket holds the same share of half-hours. The two
+    # outer edges are pushed to infinity so any future price, however extreme, still
+    # lands in a bucket.
     pooled = np.concatenate([values for values, _, _ in prepared])
     edges = np.quantile(pooled, np.linspace(0, 1, n_bins + 1))
     edges[0], edges[-1] = -np.inf, np.inf
+    # Each bucket's representative price is the mean of the training prices inside it;
+    # the solver later uses these as its stand-in prices, one per bucket.
     pooled_bins = np.clip(np.digitize(pooled, edges[1:-1]), 0, n_bins - 1)
     rep_price = np.array([pooled[pooled_bins == k].mean() for k in range(n_bins)])
 
-    counts = np.ones((slots, n_bins, n_bins))               # the Laplace prior
+    # Step 3. Count the moves: for every half-hour slot of the day, how often did the price
+    # sit in bucket i and land in bucket j one half-hour later? Starting every cell at one
+    # (the Laplace prior) keeps rare moves possible: a jump never seen in three years stays
+    # unlikely, not impossible.
+    counts = np.ones((slots, n_bins, n_bins))
     for values, slot, consecutive in prepared:
         b = np.clip(np.digitize(values, edges[1:-1]), 0, n_bins - 1)
         # tally observed slot-t -> slot-t+1 moves, only across truly consecutive half-hours
         np.add.at(counts, (slot[:-1][consecutive], b[:-1][consecutive], b[1:][consecutive]), 1)
+    # Step 4. Turn counts into odds: divide each row by its total, giving 48 tables of
+    # 16 x 16 transition probabilities, the operator's entire view of the future.
     transitions = counts / counts.sum(axis=2, keepdims=True)
     return PriceModel(edges=edges, rep_price=rep_price, transitions=transitions)
 
@@ -1118,22 +1154,33 @@ def solve_known_distribution(model: PriceModel, plant: StoragePlant, n_soc: int 
     policy = np.zeros((slots, n_soc, K), dtype=np.int8)
     span_history, checkpoints = [], {}
     sweep, span = 0, float("inf")                                   # in case max_sweeps is 0
+    # The solve itself: repeat a one-day backward sweep until the valuation settles.
+    # Each sweep prices a whole day under the fitted odds, using the previous sweep's
+    # valuation as the value of reaching tomorrow. Only the SHAPE of the valuation can
+    # settle (its level grows by one day's average profit every sweep), so a reference
+    # constant is subtracted each time and the stopping test watches the shape alone.
     for sweep in range(1, max_sweeps + 1):
-        V_prev, W = V, V                                            # W walks backward through the day
+        # Step 1. Use the current start-of-day valuation as the value of reaching
+        # tomorrow; W then walks backward through the day, slot by slot.
+        V_prev, W = V, V
         for t in reversed(range(slots)):
-            # Value of each action = its immediate reward + the expected value of where it
-            # leaves us: interpolate W at the landing state of charge, then average over where
-            # the price bin can go next (the slot-t transition row).
+            # Step 2. Price all three actions in every situation at this half-hour:
+            # cash now, at the bucket's representative price, plus the expected value
+            # of the situation the action lands in (interpolate W at the landing store
+            # level, then average over where this slot's transition odds send the price).
             action_value = np.empty((3, n_soc, K))
             for a in range(3):
                 landed = np.empty((n_soc, K))
                 for j in range(K):
                     landed[:, j] = np.interp(next_soc[a], soc_grid, W[:, j])
                 action_value[a] = reward[a] + landed @ model.transitions[t].T
-            policy[t] = action_value.argmax(axis=0)                 # this sweep's rule for slot t
+            # Step 3. The best action becomes this sweep's rule for slot t; the best
+            # value becomes the valuation surface the next-earlier slot builds on.
+            policy[t] = action_value.argmax(axis=0)
             W = action_value.max(axis=0)
-        # Span of the one-sweep change: constant growth (the average daily profit) cancels out,
-        # so the span measures only how much the SHAPE of V is still moving.
+        # Step 4. Measure how much the valuation's SHAPE moved this sweep: the constant
+        # growth (one day's average profit) cancels in the span, so a span under the
+        # tolerance means the shape has settled and the rule has stopped changing.
         diff = W - V_prev
         span = float(diff.max() - diff.min())
         span_history.append(span)
@@ -1150,8 +1197,9 @@ def solve_known_distribution(model: PriceModel, plant: StoragePlant, n_soc: int 
 # ---- Part 3. Score the rule against real prices, with the start = end boundary ----
 def run_policy(prices: np.ndarray, plant: StoragePlant, policy: np.ndarray,
                soc_grid: np.ndarray, model: PriceModel, start_soc: float = 0.0) -> dict:
-    '''Score a (slot, soc, bin) policy against a REAL price path. The action is looked up from
-    the policy, but every dollar uses the realised price, never the bin's representative price.
+    '''Simulate a (slot, soc, bin) policy through a REAL price path and score it. The action is
+    looked up from the policy, but every dollar uses the realised price, never the bin's
+    representative price.
     `start_soc` is the reservoir's starting potential energy in MWh (default empty); see
     `cyclic_score` for the repeated-year convention that chooses it.'''
     dt, P = plant.interval_hr, plant.power_mw
@@ -1163,6 +1211,12 @@ def run_policy(prices: np.ndarray, plant: StoragePlant, policy: np.ndarray,
     pump, gen, stored = np.zeros(n), np.zeros(n), np.zeros(n + 1)
     soc, profit = float(start_soc), 0.0
     stored[0] = soc
+    # The simulation loop: three moves per half-hour, and no optimisation anywhere.
+    # (1) Classify: which of the 16 buckets does the CURRENT price fall in (computed
+    #     for the whole year up front)? This is the price model's only job at run time.
+    # (2) Look up: what does the frozen rule say for this time of day, store level and
+    #     bucket? (3) Apply: carry out the action under the plant's physics, settling
+    #     every dollar at the realised price.
     for i in range(n):
         # look up the action for (this half-hour of the day, nearest store level, price bin)
         action = policy[i % slots, np.abs(soc_grid - soc).argmin(), bins[i]]
@@ -1562,7 +1616,7 @@ The contrast carries the answer. A four-hour store lives inside a single day, so
 
 #### Performance in and out of sample
 
-Now comes the real test. We let the rule trade each of the four years, paying and earning the **actual prices**, not its buckets. Three of those years it trained on; 2025 it has never seen.
+Now comes the real test. We let the rule trade each of the four years. The fitted price model keeps exactly one job in this backtest, classifying each live price into one of its 16 buckets so the right action can be looked up; every dollar is paid and earned at the **actual prices**, never at a bucket's representative price. Three of those years it trained on; 2025 it has never seen.
 
 Scheme 3 is scored under a **repeated-year accounting convention**, mirroring the cyclic year already imposed on Scheme 1: for each year we choose a starting reservoir level that equals the level the year ends at (within a stated tolerance of 0.1 GWh of dischargeable energy) when the rule trades that year's realised prices. This removes uncompensated inventory build-up from the annual profit comparison; without it, a year that quietly banks a nearly full reservoir gets no credit for the stored value. The convention uses the full year only to normalise the boundary: every dispatch decision within the year remains a causal function of the current time, price bucket and store level.
 
